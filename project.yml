@@ -1,0 +1,67 @@
+name: Whisper
+
+options:
+  bundleIdPrefix: com.hugxu0
+  deploymentTarget:
+    iOS: "26.0"
+  createIntermediateGroups: true
+  # 系统控件（拷贝、取消、相册选择器等）跟着简体中文显示
+  developmentLanguage: zh-Hans
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0.0"
+    # CI 打包时用 run_number 覆盖
+    CURRENT_PROJECT_VERSION: "1"
+    # 用 Swift 5 语言模式：本机无法编译调试，避开 Swift 6 严格并发检查带来的大量编译错误
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  Whisper:
+    type: application
+    platform: iOS
+    sources:
+      - path: Whisper
+    info:
+      path: Whisper/Info.plist
+      properties:
+        CFBundleDisplayName: 悄悄话
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleLocalizations:
+          - zh-Hans
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        "UISupportedInterfaceOrientations~ipad":
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        ITSAppUsesNonExemptEncryption: false
+        WhisperServerURL: https://hoo66.top
+        # Bark 推送点开后用这个 scheme 跳回 App 对应页面
+        CFBundleURLTypes:
+          - CFBundleURLName: com.hugxu0.whisper
+            CFBundleURLSchemes:
+              - whisper
+        # 只放开本机和局域网的明文连接（CI 截图时连本机的演示服务），线上仍然只走 HTTPS
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSPhotoLibraryUsageDescription: 用于选择要发送的照片和视频
+        NSPhotoLibraryAddUsageDescription: 用于把聊天里的照片和视频保存到相册
+        NSCameraUsageDescription: 用于拍摄照片和视频
+        NSMicrophoneUsageDescription: 用于录制语音消息
+    settings:
+      base:
+        PRODUCT_NAME: Whisper
+        PRODUCT_BUNDLE_IDENTIFIER: com.hugxu0.whisper
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor

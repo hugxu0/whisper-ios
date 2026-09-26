@@ -1,0 +1,9 @@
+# 工程由 XcodeGen 生成
+*.xcodeproj
+*.xcworkspace
+Whisper/Info.plist
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+.DS_Store
