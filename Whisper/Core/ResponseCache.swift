@@ -2,11 +2,14 @@ import Foundation
 
 /// 接口返回的原始 JSON 存一份在本地：页面打开时先用上次的内容画出来，再在后台刷新。
 /// 内存 + 磁盘（Caches/api），按路径和参数存；退出登录时清空。
+/// 解码过的结果也记在内存里：SwiftUI 会反复创建页面结构体，不能每次都重新解码。
 final class ResponseCache: @unchecked Sendable {
     static let shared = ResponseCache()
 
     private let lock = NSLock()
     private var memory: [String: (data: Data, savedAt: Date)] = [:]
+    /// 缓存键 → 类型名 → 解码好的值
+    private var decoded: [String: [String: Any]] = [:]
     private let directory: URL
 
     private init() {
@@ -46,8 +49,18 @@ final class ResponseCache: @unchecked Sendable {
     }
 
     func value<T: Decodable>(_ type: T.Type, for key: String) -> T? {
-        guard let entry = data(for: key) else { return nil }
-        return try? JSONDecoder().decode(type, from: entry.data)
+        let typeName = String(reflecting: type)
+        lock.lock()
+        if let hit = decoded[key]?[typeName] as? T {
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+        guard let entry = data(for: key), let value = try? JSONDecoder().decode(type, from: entry.data) else { return nil }
+        lock.lock()
+        decoded[key, default: [:]][typeName] = value
+        lock.unlock()
+        return value
     }
 
     /// 上次存下来到现在过了多久；没有缓存时为 nil
@@ -58,6 +71,7 @@ final class ResponseCache: @unchecked Sendable {
     func store(_ data: Data, for key: String) {
         lock.lock()
         memory[key] = (data, Date())
+        decoded[key] = nil
         lock.unlock()
         try? data.write(to: fileURL(key), options: .atomic)
     }
@@ -65,6 +79,7 @@ final class ResponseCache: @unchecked Sendable {
     func clear() {
         lock.lock()
         memory = [:]
+        decoded = [:]
         lock.unlock()
         try? FileManager.default.removeItem(at: directory)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
