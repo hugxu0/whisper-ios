@@ -2,9 +2,10 @@ import SwiftUI
 
 struct DajuView: View {
     @Environment(AppModel.self) private var app
-    @State private var pet: Pet?
-    @State private var cards: CardOverview?
-    @State private var diary: DajuDiary?
+    // 先用上次存下的内容，页面一打开就有；task 里再刷新
+    @State private var pet: Pet? = ResponseCache.shared.value(PetResponse.self, for: "v1/pet")?.pet
+    @State private var cards: CardOverview? = ResponseCache.shared.value(CardOverview.self, for: "v1/cards")
+    @State private var diary: DajuDiary? = ResponseCache.shared.value(DiaryPage.self, for: ResponseCache.key("v1/daju/diaries", query: ["limit": "1"]))?.diaries.first
     @State private var reply: String?
     @State private var reaction = 0
     @State private var reactionKind = "stroke"
@@ -29,6 +30,7 @@ struct DajuView: View {
                             reaction: reaction,
                             reactionKind: reactionKind,
                             busy: busy,
+                            unread: app.dajuUnread,
                             onAction: { action in Task { await act(action) } },
                             onChat: { chatting = true }
                         )
@@ -96,6 +98,10 @@ struct DajuView: View {
             .onChange(of: app.revision["diary"]) { _, _ in Task { await loadDiary() } }
             .navigationDestination(item: $page) { destination($0) }
             .navigationDestination(isPresented: $chatting) { ChatScreen(conversationId: app.myDajuConversationId) }
+            // 从私聊退出来：在看历史就换回最新的一段
+            .onChange(of: chatting) { old, new in
+                if old && !new { app.chat(app.myDajuConversationId).leaveHistory() }
+            }
             .onAppear { if let next = app.takePageRequest(for: "daju") { page = next } }
             .onChange(of: app.pageRequest) { if let next = app.takePageRequest(for: "daju") { page = next } }
             .alert("给它起个名字", isPresented: $renaming) {
@@ -129,15 +135,15 @@ struct DajuView: View {
     }
 
     private func loadPet() async {
-        if let response: PetResponse = try? await app.api.get("v1/pet") { pet = response.pet }
+        if let response: PetResponse = try? await app.api.get("v1/pet", cache: true) { pet = response.pet }
     }
 
     private func loadCards() async {
-        cards = try? await app.api.get("v1/cards")
+        if let value: CardOverview = try? await app.api.get("v1/cards", cache: true) { cards = value }
     }
 
     private func loadDiary() async {
-        if let page: DiaryPage = try? await app.api.get("v1/daju/diaries", query: ["limit": "1"]) { diary = page.diaries.first }
+        if let page: DiaryPage = try? await app.api.get("v1/daju/diaries", query: ["limit": "1"], cache: true) { diary = page.diaries.first }
     }
 
     private func act(_ action: String) async {
@@ -177,6 +183,8 @@ struct DajuStage: View {
     let reaction: Int
     let reactionKind: String
     let busy: Bool
+    /// 和大橘私聊里没看的消息
+    var unread = 0
     let onAction: (String) -> Void
     let onChat: () -> Void
 
@@ -358,8 +366,16 @@ struct DajuStage: View {
         Button(action: onChat) {
             HStack {
                 Image(systemName: "bubble.left.fill")
-                Text("和大橘聊一聊").font(.headline)
+                Text(unread > 0 ? "大橘回你了" : "和大橘聊一聊").font(.headline)
                 Spacer()
+                if unread > 0 {
+                    Text(unread > 99 ? "99+" : "\(unread)")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color(hex: 0xE8894A))
+                        .padding(.horizontal, 8)
+                        .frame(minWidth: 22, minHeight: 22)
+                        .background(Color.white, in: Capsule())
+                }
                 Image(systemName: "chevron.right")
             }
             .foregroundStyle(.white)
@@ -443,15 +459,19 @@ struct DiaryPreviewCard: View {
 struct CardsPreviewCard: View {
     let overview: CardOverview?
 
+    /// 存下来的是不是今天的（昨天的翻牌结果不能拿来显示）
+    private var isToday: Bool { overview?.day == Format.dayKey(Date()) }
+
     var body: some View {
         let total = overview?.flipsPerDay ?? 6
-        let flips = Dictionary((overview?.todayFlips ?? []).map { ($0.slot, $0) }, uniquingKeysWith: { first, _ in first })
+        let flips = Dictionary((isToday ? overview?.todayFlips ?? [] : []).map { ($0.slot, $0) }, uniquingKeysWith: { first, _ in first })
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 ForEach(0 ..< total, id: \.self) { slot in
                     miniCard(flips[slot])
                 }
             }
+            .opacity(overview == nil || isToday ? 1 : 0.5)
             HStack {
                 Text(headline).font(.subheadline.weight(.semibold)).foregroundStyle(Paper.ink)
                 Spacer()
@@ -482,7 +502,7 @@ struct CardsPreviewCard: View {
     }
 
     private var headline: String {
-        guard let overview else { return "每天六张牌，翻中的都留进卡包" }
+        guard let overview, isToday else { return "每天六张牌，翻中的都留进卡包" }
         let flipped = overview.todayFlips?.count ?? (overview.drawnToday ? 6 : 0)
         let total = overview.flipsPerDay ?? 6
         return flipped >= total ? "今天的牌翻完了" : "今天还能翻 \(total - flipped) 张"

@@ -149,7 +149,13 @@ struct JumpToDateView: View {
 
     private func load() async {
         defer { loading = false }
-        guard let response: Response = try? await app.api.get("v1/conversations/\(conversationId)/activity") else { return }
+        // 先用上次存的日历，再拉最新的
+        if counts.isEmpty, let cached: Response = app.api.cached("v1/conversations/\(conversationId)/activity") { apply(cached) }
+        guard let response: Response = try? await app.api.get("v1/conversations/\(conversationId)/activity", cache: true) else { return }
+        apply(response)
+    }
+
+    private func apply(_ response: Response) {
         counts = Dictionary(uniqueKeysWithValues: response.days.map { ($0.day, $0.count) })
         guard let first = response.days.first.flatMap({ Format.parseDay($0.day) }) else { return }
         var cursor = Format.calendar.date(from: Format.calendar.dateComponents([.year, .month], from: first))!

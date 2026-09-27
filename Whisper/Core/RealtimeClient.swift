@@ -1,4 +1,5 @@
 import Foundation
+import Network
 
 /// 服务端推来的实时消息
 enum RealtimeMessage {
@@ -9,7 +10,9 @@ enum RealtimeMessage {
     case daju(conversationId: String, state: String, detail: String)
 }
 
-/// WebSocket 连接：断线自动重连（1、2、4……最多 30 秒），每 25 秒发一次心跳。
+/// WebSocket 连接：断线自动重连（1、2、4……最多 30 秒）。
+/// 每 25 秒发一次心跳，10 秒内没回应就当连接已经死了、马上重连；网络切换（Wi‑Fi 和蜂窝）时也立刻重连，
+/// 不然旧连接可能一直“看起来连着”却收不到任何消息。
 @MainActor
 final class RealtimeClient {
     enum State { case disconnected, connecting, connected }
@@ -22,6 +25,9 @@ final class RealtimeClient {
     private var reconnectWork: DispatchWorkItem?
     private var wanted = false
     private var focus: String?
+    private var awaitingPong = false
+    private let pathMonitor = NWPathMonitor()
+    private var lastPath: String?
     private(set) var state: State = .disconnected
 
     var onMessage: ((RealtimeMessage) -> Void)?
@@ -29,6 +35,12 @@ final class RealtimeClient {
 
     init(api: APIClient) {
         self.api = api
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            let signature = "\(path.status)|\(path.availableInterfaces.map(\.name).joined(separator: ","))"
+            let satisfied = path.status == .satisfied
+            Task { @MainActor in self?.networkChanged(signature, satisfied: satisfied) }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "whisper.network"))
     }
 
     func connect() {
@@ -56,6 +68,7 @@ final class RealtimeClient {
     private func teardown() {
         pingTimer?.invalidate()
         pingTimer = nil
+        awaitingPong = false
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
         session?.invalidateAndCancel()
@@ -130,8 +143,41 @@ final class RealtimeClient {
     private func startPing() {
         pingTimer?.invalidate()
         pingTimer = Timer.scheduledTimer(withTimeInterval: 25, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.send(["t": "ping"]) }
+            Task { @MainActor in self?.verify() }
         }
+    }
+
+    /// 发一次心跳确认连接还活着；10 秒内没有回应就断开重连。发出的消息迟迟没确认时也会调用
+    func verify() {
+        guard state == .connected, let task, !awaitingPong else { return }
+        awaitingPong = true
+        task.sendPing { [weak self] error in
+            Task { @MainActor in
+                guard let self, self.task === task else { return }
+                self.awaitingPong = false
+                if error != nil { self.handleDrop() }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 10) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.task === task, self.awaitingPong else { return }
+                self.awaitingPong = false
+                self.handleDrop()
+            }
+        }
+    }
+
+    /// 网络换了：旧连接多半已经不通，直接重连
+    private func networkChanged(_ signature: String, satisfied: Bool) {
+        let previous = lastPath
+        lastPath = signature
+        guard let previous, previous != signature, wanted else { return }
+        teardown()
+        setState(.disconnected)
+        guard satisfied else { return }
+        reconnectAttempt = 0
+        reconnectWork?.cancel()
+        connect()
     }
 
     private func send(_ object: [String: Any]) {

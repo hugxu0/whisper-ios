@@ -44,18 +44,21 @@ struct MainTabView: View {
     var body: some View {
         ZStack(alignment: .top) {
             TabView(selection: $selection) {
+                // 聊天标签只算情侣聊天的未读；和大橘私聊的未读显示在大橘标签上，不会误以为是对方发的
                 Tab("聊天", systemImage: "bubble.left.and.bubble.right.fill", value: .chat) {
                     ChatTab()
                 }
-                .badge(app.totalUnread)
+                .badge(app.coupleUnread)
 
                 Tab("我们", systemImage: "heart.fill", value: .us) {
                     UsView()
                 }
+                .badge(app.albumUnread)
 
                 Tab("大橘", systemImage: "pawprint.fill", value: .daju) {
                     DajuView()
                 }
+                .badge(app.dajuUnread)
 
                 Tab("我", systemImage: "person.crop.circle.fill", value: .me) {
                     MeView()

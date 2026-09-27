@@ -731,7 +731,7 @@ final class CardCell: UICollectionViewCell, MessageFlashing {
             icon.frame = CGRect(x: 16, y: 14, width: 22, height: 22)
             titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
             titleLabel.frame = CGRect(x: 44, y: 16, width: width - 60, height: 20)
-            titleLabel.text = payload.plan?.kind == "memo" ? "大橘想帮你记个备忘" : "大橘想帮你建个提醒"
+            titleLabel.text = Self.confirmTitle(payload)
             summaryLabel.isHidden = true
             bodyView.isHidden = false
             bodyView.block = layout.text
@@ -750,7 +750,8 @@ final class CardCell: UICollectionViewCell, MessageFlashing {
             } else {
                 statusLabel.frame = CGRect(x: 16, y: bottomY, width: width - 32, height: 20)
                 let who = payload.handledBy == app.me?.id ? "你" : app.name(payload.handledBy ?? "")
-                statusLabel.text = payload.status == "done" ? "✅ \(who)确认了，已经建好" : "已取消"
+                let result = ["plan-delete": "已经删掉", "plan-update": "已经改好", "anniversary": "已经记下"][payload.action ?? ""] ?? "已经建好"
+                statusLabel.text = payload.status == "done" ? "✅ \(who)确认了，\(result)" : "已取消"
             }
         } else if message.kind == "reminder" {
             let height = layout.bubble.height
@@ -810,6 +811,21 @@ final class CardCell: UICollectionViewCell, MessageFlashing {
             footerLabel.frame = frame
             footerLabel.text = layout.footerText
             footerLabel.textAlignment = data.isMine ? .right : .left
+        }
+    }
+
+    /// 确认卡片的标题：按大橘要做的事
+    private static func confirmTitle(_ payload: MessagePayload) -> String {
+        switch payload.action {
+        case "plan-delete": return "大橘想帮你删掉这些计划"
+        case "plan-update": return "大橘想帮你改一下计划"
+        case "anniversary": return "大橘想帮你记一个日子"
+        default:
+            switch payload.plan?.kind {
+            case "memo": return "大橘想帮你记个备忘"
+            case "todo": return "大橘想帮你列个清单"
+            default: return "大橘想帮你建个提醒"
+            }
         }
     }
 

@@ -44,11 +44,7 @@ struct MeView: View {
 
                     PaperGroup(title: "关于") {
                         PaperRow(icon: "info.circle.fill", tint: .teal, title: "版本", value: versionText, chevron: false)
-                        PaperRow(icon: "server.rack", tint: .indigo, title: "服务器", value: app.api.baseURL.host ?? "", chevron: false)
                         PaperRow(icon: "dot.radiowaves.left.and.right", tint: app.connection == .connected ? .green : .gray, title: "实时连接", value: connectionText, chevron: false)
-                        NavigationLink { AcknowledgementsView() } label: {
-                            PaperRow(icon: "heart.fill", tint: .pink, title: "致谢")
-                        }
                     }
 
                     Button {
@@ -652,23 +648,5 @@ struct StorageSettingsView: View {
         .paperList()
         .navigationTitle("存储空间")
         .task { usage = await MediaCache.shared.diskUsage() }
-    }
-}
-
-/// 用到的第三方素材
-struct AcknowledgementsView: View {
-    var body: some View {
-        PaperList {
-            Section("大橘的 3D 模型") {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Cute Cartoon Cat Low Poly Game Ready").font(.headline)
-                    Text("作者：3Dima（sketchfab.com/Hdjusj）").font(.subheadline)
-                    Text("许可：CC BY 4.0（creativecommons.org/licenses/by/4.0）").font(.subheadline).foregroundStyle(.secondary)
-                }
-                .padding(.vertical, 4)
-            }
-        }
-        .paperList()
-        .navigationTitle("致谢")
     }
 }

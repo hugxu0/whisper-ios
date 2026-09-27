@@ -28,6 +28,10 @@ struct ChatTab: View {
             path = id.isEmpty ? [] : [id]
             app.openConversationRequest = nil
         }
+        // 退出聊天页：如果刚才在看搜索跳过去的历史，换回最新的一段，下次进来就是最新消息
+        .onChange(of: path) { old, new in
+            for id in old where !new.contains(id) { app.chat(id).leaveHistory() }
+        }
     }
 }
 
@@ -234,7 +238,7 @@ struct HomeView: View {
     // MARK: 最新消息
 
     private var recentMessages: [Message] {
-        let loaded = (app.chats["couple"]?.messages ?? []).filter { !$0.isRecalled && $0.kind != "system" }
+        let loaded = (app.chats["couple"]?.latestMessages ?? []).filter { !$0.isRecalled && $0.kind != "system" }
         if !loaded.isEmpty { return Array(loaded.suffix(3)) }
         return app.conversations["couple"]?.lastMessage.map { [$0] } ?? []
     }
@@ -325,8 +329,14 @@ struct HomeView: View {
 
     private func loadUpcoming() async {
         struct List: Decodable { let anniversaries: [Anniversary] }
-        guard let list: List = try? await app.api.get("v1/anniversaries") else { return }
-        upcoming = list.anniversaries
+        // 先用上次存下的，不用等网络
+        if upcoming == nil, let cached: List = app.api.cached("v1/anniversaries") { upcoming = Self.nearest(cached.anniversaries) }
+        guard let list: List = try? await app.api.get("v1/anniversaries", cache: true) else { return }
+        upcoming = Self.nearest(list.anniversaries)
+    }
+
+    private static func nearest(_ anniversaries: [Anniversary]) -> AnniversaryInfo? {
+        anniversaries
             .map { AnniversaryInfo($0) }
             .filter { $0.isFuture || $0.days == 0 }
             .min { $0.days < $1.days }
@@ -334,7 +344,7 @@ struct HomeView: View {
 
     private func upcomingChip(_ info: AnniversaryInfo) -> some View {
         HStack(spacing: 8) {
-            Text(info.anniversary.emoji.isEmpty ? "📅" : info.anniversary.emoji)
+            AnniversaryIcon(info: info, size: 24)
             Text(info.anniversary.title).font(.subheadline.weight(.semibold)).foregroundStyle(Paper.ink)
             Text("·").foregroundStyle(Paper.inkSoft)
             Text(info.headline).font(.subheadline).foregroundStyle(Theme.accentColor)

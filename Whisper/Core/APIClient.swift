@@ -31,20 +31,28 @@ struct UploadMeta {
 }
 
 /// 和服务端通信。请求体用字典（JSONSerialization），返回值解码成模型。
+/// 服务器入口只有 HTTP/1.1，一个连接同时只能跑一个请求：图片视频的上传下载单独用一组连接，
+/// 发消息、拉页面这些小请求不会排在大文件后面干等。
 final class APIClient {
     let baseURL: URL
     var token: String?
     var onUnauthorized: (() -> Void)?
     private let session: URLSession
+    private let transferSession: URLSession
     private let decoder = JSONDecoder()
 
     init(baseURL: URL) {
         self.baseURL = baseURL
         let configuration = URLSessionConfiguration.default
         configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 600
+        configuration.timeoutIntervalForResource = 120
         configuration.httpMaximumConnectionsPerHost = 6
         session = URLSession(configuration: configuration)
+        let transfer = URLSessionConfiguration.default
+        transfer.timeoutIntervalForRequest = 60
+        transfer.timeoutIntervalForResource = 1800
+        transfer.httpMaximumConnectionsPerHost = 4
+        transferSession = URLSession(configuration: transfer)
     }
 
     static var defaultBaseURL: URL {
@@ -87,10 +95,12 @@ final class APIClient {
 
     // MARK: - 请求
 
+    /// timeout 为空时用会话的默认值（30 秒）
     @discardableResult
-    func send(_ method: String, _ path: String, query: [String: String?] = [:], body: [String: Any]? = nil) async throws -> Data {
+    func send(_ method: String, _ path: String, query: [String: String?] = [:], body: [String: Any]? = nil, timeout: TimeInterval? = nil) async throws -> Data {
         var request = authorizedRequest(url(path, query: query))
         request.httpMethod = method
+        if let timeout { request.timeoutInterval = timeout }
         if let body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -98,12 +108,21 @@ final class APIClient {
         return try await perform(request)
     }
 
-    func get<T: Decodable>(_ path: String, query: [String: String?] = [:], as type: T.Type = T.self) async throws -> T {
-        try decode(try await send("GET", path, query: query))
+    /// cache 为真时把返回的原始 JSON 存进 ResponseCache，下次打开页面先用它
+    func get<T: Decodable>(_ path: String, query: [String: String?] = [:], cache: Bool = false, as type: T.Type = T.self) async throws -> T {
+        let data = try await send("GET", path, query: query)
+        let value: T = try decode(data)
+        if cache { ResponseCache.shared.store(data, for: ResponseCache.key(path, query: query)) }
+        return value
     }
 
-    func post<T: Decodable>(_ path: String, _ body: [String: Any]? = nil, as type: T.Type = T.self) async throws -> T {
-        try decode(try await send("POST", path, body: body ?? [:]))
+    /// 上次缓存的结果（没有或者解不开时为 nil），不走网络
+    func cached<T: Decodable>(_ path: String, query: [String: String?] = [:], as type: T.Type = T.self) -> T? {
+        ResponseCache.shared.value(type, for: ResponseCache.key(path, query: query))
+    }
+
+    func post<T: Decodable>(_ path: String, _ body: [String: Any]? = nil, timeout: TimeInterval? = nil, as type: T.Type = T.self) async throws -> T {
+        try decode(try await send("POST", path, body: body ?? [:], timeout: timeout))
     }
 
     func put<T: Decodable>(_ path: String, _ body: [String: Any], as type: T.Type = T.self) async throws -> T {
@@ -186,7 +205,7 @@ final class APIClient {
         let delegate = UploadProgressDelegate(progress: progress)
         let result: (Data, URLResponse)
         do {
-            result = try await session.upload(for: request, fromFile: body, delegate: delegate)
+            result = try await transferSession.upload(for: request, fromFile: body, delegate: delegate)
         } catch {
             throw APIError.network(error.localizedDescription)
         }
@@ -197,15 +216,23 @@ final class APIClient {
 
     /// 下载到本地文件（语音、文件、保存视频用）
     func download(_ url: URL, to destination: URL) async throws {
-        let (temporary, response) = try await session.download(for: authorizedRequest(url))
+        let (temporary, response) = try await transferSession.download(for: authorizedRequest(url))
         try check(response, Data())
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: temporary, to: destination)
     }
 
+    /// 媒体文件（图片、缩略图）：走单独的连接
     func data(_ url: URL) async throws -> Data {
-        try await perform(authorizedRequest(url))
+        let result: (Data, URLResponse)
+        do {
+            result = try await transferSession.data(for: authorizedRequest(url))
+        } catch {
+            throw APIError.network(error.localizedDescription)
+        }
+        try check(result.1, result.0)
+        return result.0
     }
 }
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// 计划：提醒、备忘、清单。
 /// 点圆圈先在本地打勾（带动画），停一会儿再收进“已完成”，请求在后台发，失败了再退回去。
@@ -14,6 +15,8 @@ struct PlansView: View {
     @State private var focused: String?
     @State private var toast: Toast?
     @State private var didSetup = false
+    /// 点开的备忘：先进阅读页，要改再点编辑
+    @State private var reading: Plan?
 
     struct PlanEditTarget: Identifiable {
         let id = UUID()
@@ -56,6 +59,7 @@ struct PlansView: View {
         .sheet(item: $editing) { target in
             PlanEditor(plan: target.plan, kind: target.kind) { Task { await model.reloadPlans(app) } }
         }
+        .navigationDestination(item: $reading) { plan in MemoReaderView(model: model, planId: plan.id) }
         .refreshable { await model.reloadPlans(app) }
         .toast($toast)
     }
@@ -145,7 +149,7 @@ struct PlansView: View {
                     MemoCard(plan: plan, focused: focused == plan.id)
                         .id(plan.id)
                         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        .onTapGesture { editing = PlanEditTarget(plan: plan, kind: plan.kind) }
+                        .onTapGesture { reading = plan }
                         .contextMenu { menu(plan) }
                         .transition(.scale(scale: 0.92).combined(with: .opacity))
                 }
@@ -486,17 +490,22 @@ private struct PlanCard: View {
     }
 }
 
+/// 每条备忘固定一个便签颜色（按 id 算）
+private enum MemoTint {
+    static let tints: [UInt32] = [0xFFC93C, 0xFF8A7A, 0x6FA8FF, 0x6CC57C, 0xB18CF2, 0xFFA552]
+
+    static func color(_ plan: Plan) -> Color {
+        let seed = plan.id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
+        return Color(hex: tints[seed % tints.count])
+    }
+}
+
 /// 备忘的便签卡片
 private struct MemoCard: View {
     let plan: Plan
     let focused: Bool
 
-    private static let tints: [UInt32] = [0xFFC93C, 0xFF8A7A, 0x6FA8FF, 0x6CC57C, 0xB18CF2, 0xFFA552]
-
-    private var tint: Color {
-        let seed = plan.id.unicodeScalars.reduce(0) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }
-        return Color(hex: Self.tints[seed % Self.tints.count])
-    }
+    private var tint: Color { MemoTint.color(plan) }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: 20, style: .continuous)
@@ -530,6 +539,128 @@ private struct MemoCard: View {
                 .overlay(shape.fill(tint.opacity(0.22)))
         }
         .overlay(shape.strokeBorder(Theme.accentColor, lineWidth: focused ? 2.5 : 0))
+    }
+}
+
+/// 备忘的阅读页：像一页便签纸，正文按 Markdown 排版；要改点右上角的“编辑”
+struct MemoReaderView: View {
+    @Environment(AppModel.self) private var app
+    @Environment(\.dismiss) private var dismiss
+    let model: UsModel
+    let planId: String
+    @State private var editing = false
+    @State private var confirmDelete = false
+    @State private var toast: Toast?
+
+    private var plan: Plan? { model.plans.first { $0.id == planId } }
+
+    var body: some View {
+        ScrollView {
+            if let plan {
+                page(plan)
+                    .padding(16)
+                    .padding(.bottom, 20)
+            } else {
+                ContentUnavailableView("这条备忘已经删掉了", systemImage: "note.text")
+                    .padding(.top, 80)
+            }
+        }
+        .background(Paper.canvas.ignoresSafeArea())
+        .navigationTitle("备忘")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if let plan {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("编辑") { editing = true }
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button(plan.pinned ? "取消置顶" : "置顶", systemImage: plan.pinned ? "pin.slash" : "pin") { Task { await setPinned(plan, !plan.pinned) } }
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("复制全文", systemImage: "doc.on.doc") {
+                        UIPasteboard.general.string = plan.body.isEmpty ? plan.title : "\(plan.title)\n\n\(plan.body)"
+                        toast = Toast(message: "复制好了")
+                    }
+                }
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("删除", systemImage: "trash", role: .destructive) { confirmDelete = true }
+                }
+            }
+        }
+        .sheet(isPresented: $editing) {
+            PlanEditor(plan: plan, kind: "memo") { Task { await model.reloadPlans(app) } }
+        }
+        .confirmationDialog("删除这条备忘？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除", role: .destructive) { Task { await delete() } }
+        }
+        .toast($toast)
+    }
+
+    private func page(_ plan: Plan) -> some View {
+        let tint = MemoTint.color(plan)
+        return VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                if plan.pinned { Image(systemName: "pin.fill").font(.subheadline).foregroundStyle(.orange) }
+                Text(plan.title)
+                    .font(.system(.title2, design: .serif).weight(.bold))
+                    .foregroundStyle(Paper.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                OwnerBadge(plan: plan)
+                Text("\(Format.short(Format.date(plan.updatedAt))) 更新")
+                    .font(.caption)
+                    .foregroundStyle(Paper.inkSoft)
+            }
+            Rectangle().fill(tint.opacity(0.45)).frame(height: 1.5).frame(maxWidth: 56)
+            if plan.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text("还没有写内容，点右上角“编辑”写点什么")
+                    .font(.body)
+                    .foregroundStyle(Paper.inkSoft)
+                    .padding(.vertical, 8)
+            } else {
+                MarkdownText(text: plan.body, bodyFont: .system(.body, design: .serif), lineSpacing: 8)
+                    .foregroundStyle(Paper.ink)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Paper.card)
+                .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(tint.opacity(0.12)))
+                .shadow(color: Paper.shadow, radius: 12, y: 5)
+        }
+        .overlay(alignment: .top) {
+            // 顶上一截胶带，像贴在桌上的便签
+            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                .fill(tint.opacity(0.55))
+                .frame(width: 70, height: 16)
+                .rotationEffect(.degrees(-3))
+                .offset(y: -8)
+        }
+    }
+
+    private func setPinned(_ plan: Plan, _ pinned: Bool) async {
+        guard let index = model.plans.firstIndex(where: { $0.id == plan.id }) else { return }
+        model.plans[index].pinned = pinned
+        do {
+            _ = try await app.api.send("PATCH", "v1/plans/\(plan.id)", body: ["pinned": pinned])
+        } catch {
+            if let index = model.plans.firstIndex(where: { $0.id == plan.id }) { model.plans[index].pinned = !pinned }
+            toast = Toast(message: "没有保存成功：\(error.localizedDescription)", icon: "exclamationmark.circle")
+        }
+    }
+
+    private func delete() async {
+        do {
+            try await app.api.delete("v1/plans/\(planId)")
+            model.plans.removeAll { $0.id == planId }
+            dismiss()
+        } catch {
+            toast = Toast(message: "没有删掉：\(error.localizedDescription)", icon: "exclamationmark.circle")
+        }
     }
 }
 
@@ -625,7 +756,20 @@ struct PlanEditor: View {
                 }
                 Section {
                     TextField("标题", text: $title)
-                    if kind != "todo" {
+                    if kind == "memo" {
+                        // 备忘可能很长，给一块大一点的地方写
+                        TextEditor(text: $bodyText)
+                            .frame(minHeight: 240)
+                            .overlay(alignment: .topLeading) {
+                                if bodyText.isEmpty {
+                                    Text("写点什么（支持 Markdown：# 标题、- 列表、- [ ] 待办）")
+                                        .foregroundStyle(.tertiary)
+                                        .padding(.top, 8)
+                                        .padding(.leading, 5)
+                                        .allowsHitTesting(false)
+                                }
+                            }
+                    } else if kind != "todo" {
                         TextField("详细内容（可选，支持 Markdown）", text: $bodyText, axis: .vertical)
                             .lineLimit(3 ... 12)
                     }

@@ -115,7 +115,7 @@ struct DiaryPaper<Content: View>: View {
 //// 大橘日记：一页一页的笔记本
 struct DiaryView: View {
     @Environment(AppModel.self) private var app
-    @State private var diaries: [DajuDiary] = []
+    @State private var diaries: [DajuDiary] = ResponseCache.shared.value(Page.self, for: ResponseCache.key("v1/daju/diaries", query: ["limit": "30"]))?.diaries ?? []
     @State private var hasMore = false
     @State private var writing = false
     @State private var toast: Toast?
@@ -169,7 +169,7 @@ struct DiaryView: View {
     private func load(more: Bool) async {
         var query: [String: String?] = ["limit": "30"]
         if more, let last = diaries.last { query["before"] = last.day }
-        guard let page: Page = try? await app.api.get("v1/daju/diaries", query: query) else { return }
+        guard let page: Page = try? await app.api.get("v1/daju/diaries", query: query, cache: !more) else { return }
         diaries = more ? diaries + page.diaries : page.diaries
         hasMore = page.hasMore
     }
@@ -294,9 +294,10 @@ struct DiaryPageView: View {
 struct MemoriesView: View {
     @Environment(AppModel.self) private var app
     @State private var layer: MemoryLayer = .profile
-    @State private var profile: [DajuMemory] = []
-    @State private var states: [DajuMemory] = []
-    @State private var events: [DajuMemory] = []
+    // 先显示上次存下的，reload 再刷新
+    @State private var profile: [DajuMemory] = MemoriesView.cached("profile", limit: "200")
+    @State private var states: [DajuMemory] = MemoriesView.cached("state", limit: "100")
+    @State private var events: [DajuMemory] = MemoriesView.cached("event", limit: "40")
     @State private var eventsHasMore = false
     @State private var loadingEvents = false
     @State private var results: [DajuMemory]?
@@ -457,8 +458,12 @@ struct MemoriesView: View {
         }
     }
 
+    private static func cached(_ kind: String, limit: String) -> [DajuMemory] {
+        ResponseCache.shared.value(Page.self, for: ResponseCache.key("v1/daju/memories", query: ["kind": kind, "limit": limit]))?.memories ?? []
+    }
+
     private func fetch(_ query: [String: String?]) async -> Page? {
-        try? await app.api.get("v1/daju/memories", query: query)
+        try? await app.api.get("v1/daju/memories", query: query, cache: true)
     }
 
     private func reload() async {
@@ -691,11 +696,13 @@ struct MemoryEditor: View {
 /// 大橘的运行记录：每次回答执行了哪些命令、搜了什么
 struct RunsView: View {
     @Environment(AppModel.self) private var app
-    @State private var runs: [DajuRun] = []
+    @State private var runs: [DajuRun] = ResponseCache.shared.value(Response.self, for: "v1/daju/runs")?.runs ?? []
     @State private var enabled = true
+    @State private var codexVersion: String?
 
     private struct Response: Decodable {
         let enabled: Bool
+        let codexVersion: String?
         let runs: [DajuRun]
     }
 
@@ -703,6 +710,8 @@ struct RunsView: View {
         PaperList {
             if !enabled {
                 Label("服务器上还没有配置大橘", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+            } else if let codexVersion {
+                Label("大橘现在用的是 \(codexVersion)", systemImage: "cpu").font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(runs) { run in
                 VStack(alignment: .leading, spacing: 6) {
@@ -732,9 +741,10 @@ struct RunsView: View {
     }
 
     private func load() async {
-        guard let response: Response = try? await app.api.get("v1/daju/runs") else { return }
+        guard let response: Response = try? await app.api.get("v1/daju/runs", cache: true) else { return }
         runs = response.runs
         enabled = response.enabled
+        codexVersion = response.codexVersion
     }
 
     private func icon(_ status: String) -> String {
@@ -761,6 +771,7 @@ struct RunsView: View {
         case "command": return "terminal"
         case "search": return "magnifyingglass"
         case "tool": return "wrench.and.screwdriver"
+        case "error": return "exclamationmark.triangle"
         default: return "timer"
         }
     }

@@ -14,6 +14,7 @@ protocol ComposerDelegate: AnyObject {
     func composerSendSticker(_ sticker: Sticker)
     func composerAddSticker()
     func composerDeleteSticker(_ sticker: Sticker)
+    func composerManageStickers()
     func composerVoiceRecorded(url: URL, durationMs: Int, waveform: [Double])
     func composerContextCleared()
     func composerLayoutChanged()
@@ -164,6 +165,7 @@ final class ComposerView: UIView, UITextViewDelegate {
         stickerPanel.onSelect = { [weak self] sticker in self?.delegate?.composerSendSticker(sticker) }
         stickerPanel.onAdd = { [weak self] in self?.delegate?.composerAddSticker() }
         stickerPanel.onDelete = { [weak self] sticker in self?.delegate?.composerDeleteSticker(sticker) }
+        stickerPanel.onManage = { [weak self] in self?.delegate?.composerManageStickers() }
         updateAction()
     }
 

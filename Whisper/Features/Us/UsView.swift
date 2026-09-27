@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// “我们”页的数据
+/// “我们”页的数据。创建时先用上次存下的内容（打开页面立刻有东西），load 再在后台刷新。
 @Observable
 @MainActor
 final class UsModel {
@@ -19,19 +19,34 @@ final class UsModel {
     private struct WishList: Decodable { let wishes: [Wish] }
     private struct CapsuleList: Decodable { let capsules: [TimeCapsule] }
 
+    init() {
+        let cache = ResponseCache.shared
+        together = cache.value(Together.self, for: "v1/together")
+        anniversaries = cache.value(AnniversaryList.self, for: "v1/anniversaries")?.anniversaries ?? []
+        plans = cache.value(PlanList.self, for: "v1/plans")?.plans ?? []
+        albums = cache.value(AlbumList.self, for: "v1/albums")?.albums ?? []
+        wishes = cache.value(WishList.self, for: "v1/wishes")?.wishes ?? []
+        capsules = cache.value(CapsuleList.self, for: "v1/capsules")?.capsules ?? []
+        // 那年今日只认今天存的
+        if let cached = cache.value(OnThisDay.self, for: "v1/on-this-day"), cached.date == Format.dayKey(Date()) { onThisDay = cached }
+    }
+
     func load(_ app: AppModel) async {
         let api = app.api
-        async let together: Together? = try? api.get("v1/together")
-        async let anniversaries: AnniversaryList? = try? api.get("v1/anniversaries")
-        async let plans: PlanList? = try? api.get("v1/plans")
-        async let albums: AlbumList? = try? api.get("v1/albums")
-        async let wishes: WishList? = try? api.get("v1/wishes")
-        async let capsules: CapsuleList? = try? api.get("v1/capsules")
-        async let onThisDay: OnThisDay? = try? api.get("v1/on-this-day")
+        async let together: Together? = try? api.get("v1/together", cache: true)
+        async let anniversaries: AnniversaryList? = try? api.get("v1/anniversaries", cache: true)
+        async let plans: PlanList? = try? api.get("v1/plans", cache: true)
+        async let albums: AlbumList? = try? api.get("v1/albums", cache: true)
+        async let wishes: WishList? = try? api.get("v1/wishes", cache: true)
+        async let capsules: CapsuleList? = try? api.get("v1/capsules", cache: true)
+        async let onThisDay: OnThisDay? = try? api.get("v1/on-this-day", cache: true)
         if let value = await together { self.together = value }
         if let value = await anniversaries { self.anniversaries = value.anniversaries }
         if let value = await plans { self.plans = value.plans }
-        if let value = await albums { self.albums = value.albums }
+        if let value = await albums {
+            self.albums = value.albums
+            app.setAlbums(value.albums)
+        }
         if let value = await wishes { self.wishes = value.wishes }
         if let value = await capsules { self.capsules = value.capsules }
         if let value = await onThisDay { self.onThisDay = value }
@@ -39,23 +54,26 @@ final class UsModel {
     }
 
     func reloadPlans(_ app: AppModel) async {
-        if let value: PlanList = try? await app.api.get("v1/plans") { plans = value.plans }
+        if let value: PlanList = try? await app.api.get("v1/plans", cache: true) { plans = value.plans }
     }
 
     func reloadAnniversaries(_ app: AppModel) async {
-        if let value: AnniversaryList = try? await app.api.get("v1/anniversaries") { anniversaries = value.anniversaries }
+        if let value: AnniversaryList = try? await app.api.get("v1/anniversaries", cache: true) { anniversaries = value.anniversaries }
     }
 
     func reloadAlbums(_ app: AppModel) async {
-        if let value: AlbumList = try? await app.api.get("v1/albums") { albums = value.albums }
+        if let value: AlbumList = try? await app.api.get("v1/albums", cache: true) {
+            albums = value.albums
+            app.setAlbums(value.albums)
+        }
     }
 
     func reloadWishes(_ app: AppModel) async {
-        if let value: WishList = try? await app.api.get("v1/wishes") { wishes = value.wishes }
+        if let value: WishList = try? await app.api.get("v1/wishes", cache: true) { wishes = value.wishes }
     }
 
     func reloadCapsules(_ app: AppModel) async {
-        if let value: CapsuleList = try? await app.api.get("v1/capsules") { capsules = value.capsules }
+        if let value: CapsuleList = try? await app.api.get("v1/capsules", cache: true) { capsules = value.capsules }
     }
 }
 
@@ -105,6 +123,8 @@ struct UsView: View {
     @State private var model = UsModel()
     @State private var editingSince = false
     @State private var page: String?
+    /// 推送里点开的相册
+    @State private var openAlbum: Album?
 
     var body: some View {
         NavigationStack {
@@ -125,7 +145,13 @@ struct UsView: View {
                             PaperSectionTitle(title: "纪念日", trailing: model.anniversaries.isEmpty ? "添加" : "全部")
                         }
                         .buttonStyle(.plain)
-                        AnniversaryPreview(model: model)
+                        // 倒数日（或者快到的日子）放大显示，下面的列表里就不再重复
+                        let spotlight = AnniversaryInfo.spotlight(model.anniversaries)
+                        if let spotlight {
+                            NavigationLink { AnniversariesView(model: model) } label: { CountdownSpotlight(info: spotlight) }
+                                .buttonStyle(.plain)
+                        }
+                        AnniversaryPreview(model: model, excluding: spotlight?.anniversary.id)
                     }
 
                     VStack(spacing: 10) {
@@ -165,8 +191,13 @@ struct UsView: View {
             .onChange(of: app.settings.shared["togetherSince"]) { _, _ in Task { await model.load(app) } }
             .sheet(isPresented: $editingSince) { TogetherSinceEditor() }
             .navigationDestination(item: $page) { destination($0) }
-            .onAppear { if let next = app.takePageRequest(for: "us") { page = next } }
+            .navigationDestination(item: $openAlbum) { AlbumDetailView(album: $0, model: model) }
+            .onAppear {
+                if let next = app.takePageRequest(for: "us") { page = next }
+                Task { await openRequestedAlbum() }
+            }
             .onChange(of: app.pageRequest) { if let next = app.takePageRequest(for: "us") { page = next } }
+            .onChange(of: app.albumRequest) { Task { await openRequestedAlbum() } }
         }
     }
 
@@ -185,6 +216,19 @@ struct UsView: View {
             }
         }
         .task { if !model.loaded { await model.load(app) } }
+    }
+
+    /// 推送里点开的相册：列表里还没有（刚建的）就先刷新一次
+    private func openRequestedAlbum() async {
+        guard let id = app.albumRequest else { return }
+        app.albumRequest = nil
+        if !model.albums.contains(where: { $0.id == id }) { await model.reloadAlbums(app) }
+        if let album = model.albums.first(where: { $0.id == id }) {
+            page = nil
+            openAlbum = album
+        } else {
+            page = "albums"
+        }
     }
 
     private var wishesSubtitle: String {
@@ -363,9 +407,16 @@ private struct AlbumsTile: View {
     var body: some View {
         let photos = model.albums.reduce(0) { $0 + $1.count }
         let latest = model.albums.compactMap(\.lastPostAt).max()
+        let newPosts = model.albums.reduce(0) { $0 + ($1.newPosts ?? 0) }
+        let newComments = model.albums.reduce(0) { $0 + ($1.newComments ?? 0) }
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top) {
                 PaperIcon(systemName: "photo.stack.fill", tint: Color(hex: 0x5A9E8F), size: 40)
+                    .overlay(alignment: .topTrailing) {
+                        if newPosts + newComments > 0 {
+                            Circle().fill(.red).frame(width: 11, height: 11).overlay(Circle().stroke(Paper.card, lineWidth: 2)).offset(x: 3, y: -2)
+                        }
+                    }
                 Spacer()
                 Text("\(photos)")
                     .font(.system(size: 30, weight: .bold, design: .serif))
@@ -374,10 +425,17 @@ private struct AlbumsTile: View {
             }
             Spacer(minLength: 0)
             Text("共同相册").font(Paper.title(.headline)).foregroundStyle(Paper.ink)
-            Text(subtitle(latest))
-                .font(.caption)
-                .foregroundStyle(Paper.inkSoft)
-                .lineLimit(2)
+            if newPosts + newComments > 0 {
+                Text([newPosts > 0 ? "\(newPosts) 条新动态" : "", newComments > 0 ? "\(newComments) 条新评论" : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            } else {
+                Text(subtitle(latest))
+                    .font(.caption)
+                    .foregroundStyle(Paper.inkSoft)
+                    .lineLimit(2)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .paperCard(padding: 14)
@@ -390,15 +448,16 @@ private struct AlbumsTile: View {
     }
 }
 
-/// 纪念日：最多三条。倒数的（还没到的）才画圆环，已经过去的只写过了多少天
+/// 纪念日：最多三条（上面放大倒数的那条除外）。倒数的（还没到的）才画圆环，已经过去的只写过了多少天
 struct AnniversaryPreview: View {
     let model: UsModel
+    var excluding: String?
 
     var body: some View {
-        let infos = Array(AnniversaryInfo.sorted(model.anniversaries).prefix(3))
+        let infos = Array(AnniversaryInfo.sorted(model.anniversaries).filter { $0.anniversary.id != excluding }.prefix(3))
         VStack(spacing: 0) {
-            if infos.isEmpty {
-                Text("记下生日、纪念日，到了那天大橘会来祝福")
+            if infos.isEmpty && excluding == nil {
+                Text("记下生日、纪念日，或者倒数见面的日子，到了那天大橘会来说一声")
                     .font(.subheadline)
                     .foregroundStyle(Paper.inkSoft)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -413,49 +472,9 @@ struct AnniversaryPreview: View {
             }
         }
         .paperCard(padding: 0)
-    }
-}
-
-/// 纪念日的一行
-struct AnniversaryLine: View {
-    let info: AnniversaryInfo
-
-    var body: some View {
-        let countdown = info.isFuture || info.isToday
-        HStack(spacing: 14) {
-            Group {
-                if countdown {
-                    CountdownRing(progress: info.progress, tint: Theme.accentColor, lineWidth: 3.5) {
-                        Text(info.emoji).font(.title3)
-                    }
-                } else {
-                    Text(info.emoji)
-                        .font(.title3)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(Paper.inset, in: Circle())
-                }
-            }
-            .frame(width: 44, height: 44)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(info.anniversary.title).font(.headline).foregroundStyle(Paper.ink).lineLimit(1)
-                Text(info.subtitle).font(.caption).foregroundStyle(Paper.inkSoft).lineLimit(1)
-            }
-            Spacer(minLength: 6)
-            if info.isToday {
-                Text("就是今天").font(.system(.headline, design: .serif)).foregroundStyle(Theme.accentColor)
-            } else {
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    if !countdown { Text("已经").font(.caption).foregroundStyle(Paper.inkSoft) }
-                    Text("\(info.days)")
-                        .font(.system(size: 24, weight: .bold, design: .serif))
-                        .foregroundStyle(countdown ? Theme.accentColor : Paper.ink)
-                    Text(countdown ? "天后" : "天").font(.caption).foregroundStyle(Paper.inkSoft)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
+        // 只有放大显示的那一条时，下面就不要一张空卡片
+        .opacity(infos.isEmpty && excluding != nil ? 0 : 1)
+        .frame(height: infos.isEmpty && excluding != nil ? 0 : nil)
     }
 }
 

@@ -15,10 +15,6 @@ final class ChatViewController: UIViewController {
     private let composer = ComposerView()
     private let jumpButton = UIButton(configuration: .glass())
     private let replyIndicator = UIImageView(image: UIImage(systemName: "arrowshape.turn.up.left.circle.fill"))
-    /// 时间线延伸到导航栏下面：顶部用渐隐的毛玻璃衬住标题；底部用系统的滚动边缘效果（输入栏登记成边缘元素）
-    private let topBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-    private let topBlurMask = CAGradientLayer()
-    private let topEdgeContainer = UIView()
     /// 聊天背景：渐变（可带平铺小图案）或照片
     private let wallpaperGradient = GradientView()
     private let wallpaperPattern = UIView()
@@ -30,6 +26,8 @@ final class ChatViewController: UIViewController {
     private var lastWidth: CGFloat = 0
     /// 跳转到的那条消息：从什么时候开始闪，cell 重建时接着闪完
     private var highlight: (id: String, start: CFTimeInterval)?
+    /// 刚跳转到的消息：之后一小会儿里排版变了（键盘收起、搜索页关掉、往前后翻页）都让它留在屏幕中间；用户一拖就放开
+    private var pinned: (id: String, until: CFTimeInterval)?
     /// 是否跟着最新消息走。只在用户自己拖动时改变，程序滚动的中途不会误判成“离开了底部”
     private var stickToBottom = true
     private var lastTypingSent = Date.distantPast
@@ -77,7 +75,8 @@ final class ChatViewController: UIViewController {
         collectionView.keyboardDismissMode = .onDrag
         // 上下留白全部自己算（按输入栏的实际位置），不让系统再叠加安全区，键盘弹起收起时才不会算错
         collectionView.contentInsetAdjustmentBehavior = .never
-        collectionView.topEdgeEffect.style = .soft
+        // 顶部完全透明（沉浸），底部用系统的滚动边缘效果衬住输入栏
+        collectionView.topEdgeEffect.isHidden = true
         collectionView.bottomEdgeEffect.style = .soft
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -87,24 +86,13 @@ final class ChatViewController: UIViewController {
         collectionView.register(TypingCell.self, forCellWithReuseIdentifier: TypingCell.reuseId)
         collectionView.register(LoadingCell.self, forCellWithReuseIdentifier: LoadingCell.reuseId)
         view.addSubview(collectionView)
-        topBlur.isUserInteractionEnabled = false
-        topBlurMask.colors = [UIColor.black.cgColor, UIColor.black.withAlphaComponent(0.85).cgColor, UIColor.clear.cgColor]
-        topBlurMask.locations = [0, 0.6, 1]
-        topBlur.layer.mask = topBlurMask
-        view.addSubview(topBlur)
-        topEdgeContainer.isUserInteractionEnabled = false
-        view.addSubview(topEdgeContainer)
-        let topEdge = UIScrollEdgeElementContainerInteraction()
-        topEdge.scrollView = collectionView
-        topEdge.edge = .top
-        topEdgeContainer.addInteraction(topEdge)
 
         composer.translatesAutoresizingMaskIntoConstraints = false
         composer.delegate = self
         composer.hudHost = view
         composer.showsDajuShortcut = chat.conversationId == "couple"
         composer.refreshMenu()
-        composer.stickerPanel.stickers = app.stickers
+        composer.stickerPanel.update(stickers: app.stickers, groups: app.stickerGroups)
         view.addSubview(composer)
         let bottomEdge = UIScrollEdgeElementContainerInteraction()
         bottomEdge.scrollView = collectionView
@@ -154,15 +142,21 @@ final class ChatViewController: UIViewController {
         }
         applyWallpaper()
         observeWallpaper()
+        observeStickers()
+        // 深浅色切换时换成对应的那张背景
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (controller: ChatViewController, _: UITraitCollection) in
+            controller.applyWallpaper()
+        }
         Task { await chat.ensureLoaded() }
     }
 
     // MARK: - 聊天背景
 
-    /// 个人设置里的 chatWallpaper 变了就重新铺背景
+    /// 个人设置里的聊天背景（白天、黑夜各一张）变了就重新铺
     private func observeWallpaper() {
         withObservationTracking {
             _ = app.settings.mine["chatWallpaper"]
+            _ = app.settings.mine["chatWallpaperDark"]
         } onChange: { [weak self] in
             DispatchQueue.main.async {
                 self?.applyWallpaper()
@@ -172,7 +166,7 @@ final class ChatViewController: UIViewController {
     }
 
     private func applyWallpaper() {
-        let next = ChatWallpaper.from(app.settings.mine["chatWallpaper"])
+        let next = ChatWallpaper.current(app.settings.mine, dark: traitCollection.userInterfaceStyle == .dark)
         let changed = next != wallpaper
         wallpaper = next
         [wallpaperGradient, wallpaperPattern, wallpaperImage, wallpaperDim].forEach { $0.isHidden = true }
@@ -262,7 +256,10 @@ final class ChatViewController: UIViewController {
             // 可见高度变了：不满一屏时贴底的位置要重算
             chatLayout.invalidateLayout()
             collectionView.layoutIfNeeded()
-            if stickToBottom && !collectionView.isTracking {
+            if let target = pinnedTarget {
+                // 刚跳转过去：键盘收起、搜索页关掉引起的变化，都让那条消息留在中间
+                center(on: target)
+            } else if stickToBottom && !collectionView.isTracking {
                 scrollToBottom(animated: false)
             } else if abs(old.bottom - bottom) > 0.5 {
                 // 键盘弹出、输入栏变高时，内容跟着输入栏一起移动，正在看的那几条不被挡住
@@ -270,9 +267,6 @@ final class ChatViewController: UIViewController {
             }
         }
         jumpButton.frame = CGRect(x: view.bounds.width - 58, y: composer.frame.minY - 54, width: 44, height: 44)
-        topBlur.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: view.safeAreaInsets.top + 16)
-        topBlurMask.frame = topBlur.bounds
-        topEdgeContainer.frame = CGRect(x: 0, y: 0, width: view.bounds.width, height: view.safeAreaInsets.top)
         if view.bounds.width != lastWidth, view.bounds.width > 0 {
             let firstLayout = lastWidth == 0
             lastWidth = view.bounds.width
@@ -310,6 +304,7 @@ final class ChatViewController: UIViewController {
                 stickToBottom = false
                 let start = CACurrentMediaTime()
                 highlight = (anchor, start)
+                pinned = (anchor, start + 1.8)
                 rebuild(anchor: .scrollTo(anchor))
                 DispatchQueue.main.asyncAfter(deadline: .now() + MessageFlash.duration + 0.2) { [weak self] in
                     if self?.highlight?.start == start { self?.highlight = nil }
@@ -317,6 +312,7 @@ final class ChatViewController: UIViewController {
             } else {
                 // 整个窗口换掉了，旧位置和新内容没有关系，直接落到底部
                 stickToBottom = true
+                pinned = nil
                 rebuild(anchor: .bottom(animated: false))
             }
             didInitialScroll = true
@@ -324,7 +320,10 @@ final class ChatViewController: UIViewController {
             rebuild(anchor: .keepAnchor)
         case .appended:
             let lastIsMine = chat.displayMessages.last?.senderId == app.me?.id
-            if lastIsMine { stickToBottom = true }
+            if lastIsMine {
+                stickToBottom = true
+                pinned = nil
+            }
             rebuild(anchor: stickToBottom ? .bottom(animated: true) : .keepAnchor, animateInsert: true)
         case .updated:
             rebuild(anchor: stickToBottom ? .keepBottom : .keepAnchor)
@@ -353,7 +352,27 @@ final class ChatViewController: UIViewController {
         }
     }
 
-    private func rebuild(anchor intent: ScrollIntent, animateInsert: Bool = false) {
+    /// 还在“钉住”时间里的跳转目标
+    private var pinnedTarget: String? {
+        guard let pinned, CACurrentMediaTime() < pinned.until else { return nil }
+        return pinned.id
+    }
+
+    /// 把一条消息放在可见区域中间偏上一点
+    private func center(on id: String) {
+        guard let index = rows.firstIndex(where: { $0.id == id }) else { return }
+        chatLayout.prepareIfStale()
+        guard let frame = chatLayout.frame(at: index) else { return }
+        let inset = collectionView.adjustedContentInset
+        let visible = collectionView.bounds.height - inset.top - inset.bottom
+        // 用 setContentOffset 顺便停掉还在进行的滚动动画，免得动画把位置又带走
+        collectionView.setContentOffset(CGPoint(x: 0, y: clampedOffset(frame.midY - inset.top - visible * 0.42)), animated: false)
+    }
+
+    private func rebuild(anchor requested: ScrollIntent, animateInsert: Bool = false) {
+        // 刚跳转过去的那条：这期间的翻页、刷新都以它为准，不按屏幕顶上那条保持
+        var intent = requested
+        if let target = pinnedTarget, case .keepAnchor = requested { intent = .scrollTo(target) }
         let oldIds = rows.map(\.id)
         let oldSignatures = rows.map(\.signature)
         let savedAnchor = firstVisibleAnchor()
@@ -394,20 +413,16 @@ final class ChatViewController: UIViewController {
                 collectionView.contentOffset.y = clampedOffset(frame.minY - savedAnchor.offset)
             }
         case .scrollTo(let id):
-            if let index = rows.firstIndex(where: { $0.id == id }), let frame = chatLayout.frame(at: index) {
-                let visible = collectionView.bounds.height - collectionView.adjustedContentInset.top - collectionView.adjustedContentInset.bottom
-                // 目标消息放在可见区域中间偏上一点
-                let target = frame.midY - collectionView.adjustedContentInset.top - visible * 0.42
-                collectionView.contentOffset.y = clampedOffset(target)
-            }
+            center(on: id)
         }
         updateJumpButton()
     }
 
     private var minOffset: CGFloat { -collectionView.adjustedContentInset.top }
 
+    /// 内容高度用布局自己算的（刚换过整页数据时 collectionView.contentSize 可能还是旧的）
     private var maxOffset: CGFloat {
-        max(minOffset, collectionView.contentSize.height + collectionView.adjustedContentInset.bottom - collectionView.bounds.height)
+        max(minOffset, chatLayout.totalHeight + collectionView.adjustedContentInset.bottom - collectionView.bounds.height)
     }
 
     private func clampedOffset(_ y: CGFloat) -> CGFloat {
@@ -582,15 +597,7 @@ final class ChatViewController: UIViewController {
             })
         }
         if message.kind == "image" || message.kind == "sticker" {
-            actions.append(UIAction(title: "添加到贴纸", image: UIImage(systemName: "face.smiling")) { [weak self] _ in
-                guard let self, let media = message.media.first else { return }
-                Task {
-                    _ = try? await self.app.api.send("POST", "v1/stickers", body: ["mediaId": media.id])
-                    await self.app.reloadStickers()
-                    self.composer.stickerPanel.stickers = self.app.stickers
-                    Haptics.success()
-                }
-            })
+            actions.append(stickerMenu(for: message))
         }
         if message.kind == "image" || message.kind == "video" {
             actions.append(UIAction(title: "保存到相册", image: UIImage(systemName: "square.and.arrow.down")) { [weak self] _ in
@@ -625,6 +632,49 @@ final class ChatViewController: UIViewController {
         }
         let title = Format.fullDateTime.string(from: message.date) + (message.editedAt != nil ? " · 已编辑" : "")
         return UIMenu(title: title, children: sections)
+    }
+
+    /// “添加到贴纸”：有分组时直接选放进哪一组
+    private func stickerMenu(for message: Message) -> UIMenuElement {
+        let add: (String?) -> Void = { [weak self] groupId in
+            guard let self, let media = message.media.first else { return }
+            Task { await self.addSticker(mediaId: media.id, groupId: groupId) }
+        }
+        let icon = UIImage(systemName: "face.smiling")
+        guard !app.stickerGroups.isEmpty else {
+            return UIAction(title: "添加到贴纸", image: icon) { _ in add(nil) }
+        }
+        let loose = UIAction(title: "不分组", image: UIImage(systemName: "tray")) { _ in add(nil) }
+        let groups = app.stickerGroups.map { group in
+            UIAction(title: group.title, image: UIImage(systemName: "folder")) { _ in add(group.id) }
+        }
+        return UIMenu(title: "添加到贴纸", image: icon, children: [loose] + groups)
+    }
+
+    private func addSticker(mediaId: String, groupId: String?) async {
+        var body: [String: Any] = ["mediaId": mediaId]
+        if let groupId { body["groupId"] = groupId }
+        guard let state: StickerState = try? await app.api.post("v1/stickers", body) else {
+            showAlert("没有加上", "网络不太好，等会儿再试试")
+            return
+        }
+        app.applyStickers(state)
+        composer.stickerPanel.update(stickers: app.stickers, groups: app.stickerGroups)
+        Haptics.success()
+    }
+
+    /// 另一台手机改了贴纸（收到 stickers 事件后重新拉过）：面板跟着更新
+    private func observeStickers() {
+        withObservationTracking {
+            _ = app.stickers
+            _ = app.stickerGroups
+        } onChange: { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.composer.stickerPanel.update(stickers: self.app.stickers, groups: self.app.stickerGroups)
+                self.observeStickers()
+            }
+        }
     }
 
     static func emojiImage(_ emoji: String) -> UIImage {
@@ -706,6 +756,11 @@ extension ChatViewController: UICollectionViewDataSource, UICollectionViewDelega
     func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell, forItemAt indexPath: IndexPath) {
         guard let highlight, indexPath.item < rows.count, rows[indexPath.item].id == highlight.id else { return }
         (cell as? MessageFlashing)?.flash(elapsed: CACurrentMediaTime() - highlight.start)
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        // 用户自己开始拖了，就不再把跳转的目标钉在中间
+        pinned = nil
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -917,10 +972,19 @@ extension ChatViewController: ComposerDelegate {
 
     func composerDeleteSticker(_ sticker: Sticker) {
         Task {
-            try? await app.api.delete("v1/stickers/\(sticker.id)")
-            await app.reloadStickers()
-            composer.stickerPanel.stickers = app.stickers
+            if let data = try? await app.api.send("DELETE", "v1/stickers/\(sticker.id)"), let state = try? JSONDecoder().decode(StickerState.self, from: data) {
+                app.applyStickers(state)
+            } else {
+                await app.reloadStickers()
+            }
+            composer.stickerPanel.update(stickers: app.stickers, groups: app.stickerGroups)
         }
+    }
+
+    func composerManageStickers() {
+        composer.textView.resignFirstResponder()
+        composer.resetInputView()
+        presentSwiftUI(NavigationStack { StickerManagerView() })
     }
 
     func composerVoiceRecorded(url: URL, durationMs: Int, waveform: [Double]) {
@@ -942,17 +1006,21 @@ extension ChatViewController: ComposerDelegate {
         for video in videos { chat.sendMedia([video], kind: "video") }
     }
 
+    /// 从相册加的贴纸放进面板上正在看的那个分组
     private func uploadStickers(_ items: [PreparedMedia]) {
+        let groupId = composer.stickerPanel.selectedGroupId
         Task {
             for item in items {
                 if let media = try? await app.api.upload(meta: item.meta, file: item.fileURL, filename: item.filename, thumb: item.thumbnail) {
                     if let data = try? Data(contentsOf: item.fileURL) { MediaCache.shared.store(data, id: media.id, thumb: false) }
-                    _ = try? await app.api.send("POST", "v1/stickers", body: ["mediaId": media.id])
+                    var body: [String: Any] = ["mediaId": media.id]
+                    if let groupId { body["groupId"] = groupId }
+                    _ = try? await app.api.send("POST", "v1/stickers", body: body)
                 }
                 try? FileManager.default.removeItem(at: item.fileURL)
             }
             await app.reloadStickers()
-            composer.stickerPanel.stickers = app.stickers
+            composer.stickerPanel.update(stickers: app.stickers, groups: app.stickerGroups)
             Haptics.success()
         }
     }

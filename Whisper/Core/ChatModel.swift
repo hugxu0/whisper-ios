@@ -102,6 +102,11 @@ final class ChatModel {
     }
 
     private func notify(_ change: Change) {
+        // 消息已经以任何方式到了（接口返回、实时事件、整页加载），发送中的那份就去掉，不会一直显示“发送中”
+        if !outgoing.isEmpty {
+            let confirmed = Set(messages.map(\.id)).union(liveTail.map(\.id))
+            outgoing.removeAll { confirmed.contains($0.id) }
+        }
         lastChange = change
         version += 1
         onChange?(change)
@@ -119,6 +124,15 @@ final class ChatModel {
 
     func snapshotForCache() -> [Message] {
         Array((isLive ? messages : liveTail).suffix(80))
+    }
+
+    /// 最新的那几条（在看历史时是留着的最新一段）：聊天首页的预览用
+    var latestMessages: [Message] { isLive ? messages : liveTail }
+
+    /// 离开聊天页时调用：在看历史就换回最新的一段，下次进来直接是最新消息
+    func leaveHistory() {
+        guard !isLive else { return }
+        Task { await jumpToLatest() }
     }
 
     private func fetch(_ query: [String: String?]) async throws -> MessagePage {
@@ -406,6 +420,15 @@ final class ChatModel {
         outgoing.append(message)
         notify(.appended)
         Task { await deliver(message) }
+        watch(message.id)
+    }
+
+    /// 几秒还没确认：实时连接可能已经断了，让它马上检查一下（断了会重连，重连后补拉就能确认）
+    private func watch(_ id: String) {
+        Task {
+            try? await Task.sleep(for: .seconds(6))
+            if outgoing.contains(where: { $0.id == id && !$0.failed }) { app.realtime.verify() }
+        }
     }
 
     private func updateOutgoing(_ id: String, _ change: (inout OutgoingMessage) -> Void) {
@@ -414,6 +437,7 @@ final class ChatModel {
         notify(.updated)
     }
 
+    /// 发出去；网络问题自动再试两次（服务端按消息 id 去重，重发不会多出一条），请求本身有问题就不再试
     private func deliver(_ message: OutgoingMessage) async {
         var body: [String: Any] = ["id": message.id, "conversationId": conversationId, "kind": message.kind, "text": message.text]
         if !message.mediaIds.isEmpty { body["mediaIds"] = message.mediaIds }
@@ -421,18 +445,38 @@ final class ChatModel {
         if let waveform = message.waveform { body["waveform"] = waveform }
         if let sticker = message.stickerId { body["stickerId"] = sticker }
         if let interaction = message.interaction { body["interaction"] = interaction }
-        do {
-            struct Response: Decodable { let message: Message }
-            let response: Response = try await app.api.post("v1/messages", body)
-            upsert(response.message)
-            var summary = app.conversations[conversationId]
-            if summary != nil, response.message.seq >= (summary?.lastMessage?.seq ?? 0) {
-                summary?.lastMessage = response.message
-                app.conversations[conversationId] = summary
+        struct Response: Decodable { let message: Message }
+        attempts: for attempt in 0 ..< 3 {
+            if attempt > 0 {
+                try? await Task.sleep(for: .seconds(attempt == 1 ? 1.5 : 4))
+                // 等的时候已经通过实时事件确认了
+                guard outgoing.contains(where: { $0.id == message.id }) else { return }
             }
-        } catch {
-            updateOutgoing(message.id) { $0.failed = true }
+            do {
+                let response: Response = try await app.api.post("v1/messages", body, timeout: 15)
+                upsert(response.message)
+                var summary = app.conversations[conversationId]
+                if summary != nil, response.message.seq >= (summary?.lastMessage?.seq ?? 0) {
+                    summary?.lastMessage = response.message
+                    app.conversations[conversationId] = summary
+                }
+                return
+            } catch APIError.unauthorized {
+                break attempts
+            } catch APIError.http(let status, _, _) where status < 500 && status != 429 {
+                break attempts
+            } catch {
+                app.realtime.verify()
+            }
         }
+        if outgoing.contains(where: { $0.id == message.id }) { updateOutgoing(message.id) { $0.failed = true } }
+    }
+
+    /// 重新连上以后：还停在“发送中”好几秒的再发一次，确认它到底发出去没有
+    func confirmPending() async {
+        let now = Date().timeIntervalSince1970 * 1000
+        let stale = outgoing.filter { !$0.failed && $0.progress == nil && ($0.media.isEmpty || !$0.mediaIds.isEmpty) && now - $0.createdAt > 8000 }
+        for message in stale { await deliver(message) }
     }
 
     func retry(_ id: String) {

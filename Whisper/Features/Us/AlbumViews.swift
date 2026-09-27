@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UIKit
 
 // 共同相册：每个相册是一条按时间倒序的“动态”时间线，一条动态是同一次发表的几张照片视频和一段文案。
 
@@ -57,6 +58,19 @@ private struct AlbumCard: View {
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                 .shadow(color: .black.opacity(0.08), radius: 8, y: 4)
+                .overlay(alignment: .topTrailing) {
+                    // 对方的新动态、新评论
+                    if album.unread > 0 {
+                        Text(album.unread > 99 ? "99+" : "\(album.unread)")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 7)
+                            .frame(minWidth: 22, minHeight: 22)
+                            .background(Color.red, in: Capsule())
+                            .overlay(Capsule().stroke(Paper.canvas, lineWidth: 2))
+                            .offset(x: 6, y: -6)
+                    }
+                }
             Text(album.title).font(.subheadline.weight(.semibold)).lineLimit(1)
             Text("\(album.postCount ?? album.count) 条动态 · \(album.count) 个片段")
                 .font(.caption)
@@ -140,6 +154,7 @@ struct AlbumDetailView: View {
     @State private var confirmDeleteAlbum = false
     @State private var viewer: ViewerRequest?
     @State private var toast: Toast?
+    @State private var commenting: CommentTarget?
 
     private struct ViewerRequest: Identifiable {
         let id = UUID()
@@ -147,9 +162,17 @@ struct AlbumDetailView: View {
         let index: Int
     }
 
-    private struct PostList: Decodable { let posts: [AlbumPost] }
+    /// 在哪条动态下写评论；replyTo 不为空时是回复某条评论
+    private struct CommentTarget: Identifiable {
+        let id = UUID()
+        let post: AlbumPost
+        let replyTo: AlbumComment?
+    }
+
+    private struct PostList: Codable { let posts: [AlbumPost] }
 
     private var current: Album { model.albums.first { $0.id == album.id } ?? album }
+    private var postsPath: String { "v1/albums/\(album.id)/posts" }
 
     var body: some View {
         GeometryReader { proxy in
@@ -166,7 +189,9 @@ struct AlbumDetailView: View {
                                     width: max(0, proxy.size.width - 32),
                                     onOpen: { index in open(post, at: index) },
                                     onEdit: { editingCaption = post },
-                                    onDelete: { deleting = post }
+                                    onDelete: { deleting = post },
+                                    onComment: { replyTo in commenting = CommentTarget(post: post, replyTo: replyTo) },
+                                    onDeleteComment: { comment in Task { await deleteComment(comment) } }
                                 )
                                 if post.id != posts.last?.id {
                                     Divider().padding(.leading, 62)
@@ -197,9 +222,21 @@ struct AlbumDetailView: View {
                 Button("删除相册", systemImage: "trash", role: .destructive) { confirmDeleteAlbum = true }
             }
         }
-        .task { await load() }
+        .task {
+            if posts.isEmpty, let cached: PostList = app.api.cached(postsPath) {
+                posts = cached.posts
+                loaded = true
+            }
+            await load()
+            await markSeen()
+        }
         .refreshable { await load() }
         .onChange(of: app.revision["album"]) { _, _ in Task { await load() } }
+        .sheet(item: $commenting) { target in
+            CommentComposer(replyTo: target.replyTo.map { app.displayName($0.userId) }) { text in
+                await sendComment(text, on: target.post, replyTo: target.replyTo)
+            }
+        }
         .sheet(isPresented: $picking) {
             PhotoPicker(limit: 30) { results in
                 picking = false
@@ -302,10 +339,41 @@ struct AlbumDetailView: View {
     }
 
     private func load() async {
-        if let list: PostList = try? await app.api.get("v1/albums/\(album.id)/posts") {
-            posts = list.posts
+        if let list: PostList = try? await app.api.get(postsPath, cache: true) {
+            withAnimation(.snappy) { posts = list.posts }
         }
         loaded = true
+    }
+
+    /// 打开相册一会儿之后算看过了：“新”的标记先留着让人看到，未读数清零
+    private func markSeen() async {
+        guard current.unread > 0 || posts.contains(where: { $0.isNew == true }) else { return }
+        try? await Task.sleep(for: .seconds(1.5))
+        _ = try? await app.api.send("POST", "v1/albums/\(album.id)/seen")
+        await model.reloadAlbums(app)
+    }
+
+    private func sendComment(_ text: String, on post: AlbumPost, replyTo: AlbumComment?) async -> Bool {
+        var body: [String: Any] = ["text": text]
+        if let replyTo { body["replyToId"] = replyTo.id }
+        do {
+            _ = try await app.api.send("POST", "v1/albums/\(album.id)/posts/\(post.id)/comments", body: body)
+            Haptics.success()
+            await load()
+            return true
+        } catch {
+            toast = Toast(message: "没发出去：\(error.localizedDescription)", icon: "exclamationmark.circle")
+            return false
+        }
+    }
+
+    private func deleteComment(_ comment: AlbumComment) async {
+        do {
+            try await app.api.delete("v1/albums/\(album.id)/comments/\(comment.id)")
+            await load()
+        } catch {
+            toast = Toast(message: "没删掉：\(error.localizedDescription)", icon: "exclamationmark.circle")
+        }
     }
 
     /// 一张一张处理、上传，最后作为一条动态发表
@@ -335,7 +403,7 @@ struct AlbumDetailView: View {
     }
 }
 
-/// 时间线上的一条动态：左边日期轨，右边作者、文案和照片
+/// 时间线上的一条动态：左边日期轨，右边作者、文案、照片和评论
 private struct AlbumPostRow: View {
     @Environment(AppModel.self) private var app
     let post: AlbumPost
@@ -343,6 +411,9 @@ private struct AlbumPostRow: View {
     let onOpen: (Int) -> Void
     let onEdit: () -> Void
     let onDelete: () -> Void
+    /// 写评论（nil）或回复某条评论
+    let onComment: (AlbumComment?) -> Void
+    let onDeleteComment: (AlbumComment) -> Void
 
     private static let dayFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -393,6 +464,14 @@ private struct AlbumPostRow: View {
                     AvatarView(userId: post.addedBy, size: 22)
                     Text(post.addedBy == app.me?.id ? "我" : app.name(post.addedBy))
                         .font(.subheadline.weight(.semibold))
+                    if post.isNew == true {
+                        Text("新")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.red, in: Capsule())
+                    }
                     Spacer()
                     Menu {
                         Button("编辑文案", systemImage: "pencil", action: onEdit)
@@ -412,13 +491,82 @@ private struct AlbumPostRow: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 mediaStrip(bodyWidth)
-                Text(Self.timeFormatter.string(from: date))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+                HStack {
+                    Text(Self.timeFormatter.string(from: date))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                    Spacer()
+                    Button {
+                        Haptics.tap()
+                        onComment(nil)
+                    } label: {
+                        Label("评论", systemImage: "bubble.left")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Paper.inkSoft)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Paper.inset, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                if let comments = post.comments, !comments.isEmpty {
+                    commentList(comments)
+                }
             }
             .padding(.vertical, 14)
             .frame(width: bodyWidth, alignment: .leading)
         }
+    }
+
+    /// 评论：点别人的是回复，长按自己的可以删
+    private func commentList(_ comments: [AlbumComment]) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            ForEach(comments) { comment in
+                let mine = comment.userId == app.me?.id
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(commentText(comment))
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if comment.isNew == true {
+                        Circle().fill(.red).frame(width: 6, height: 6)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { if !mine { onComment(comment) } }
+                .contextMenu {
+                    if mine {
+                        Button("删除评论", systemImage: "trash", role: .destructive) { onDeleteComment(comment) }
+                    } else {
+                        Button("回复", systemImage: "arrowshape.turn.up.left") { onComment(comment) }
+                    }
+                    Button("复制", systemImage: "doc.on.doc") { UIPasteboard.general.string = comment.text }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Paper.inset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    /// “小偲 回复 小旭：好看”
+    private func commentText(_ comment: AlbumComment) -> AttributedString {
+        var result = AttributedString(app.displayName(comment.userId))
+        result.font = Font.subheadline.weight(.semibold)
+        result.foregroundColor = Theme.accentColor
+        if let target = comment.replyToUserId {
+            var reply = AttributedString(" 回复 ")
+            reply.foregroundColor = Paper.inkSoft
+            result += reply
+            var name = AttributedString(app.displayName(target))
+            name.font = Font.subheadline.weight(.semibold)
+            name.foregroundColor = Theme.accentColor
+            result += name
+        }
+        var body = AttributedString("：\(comment.text)")
+        body.foregroundColor = Paper.ink
+        result += body
+        return result
     }
 
     private func mediaStrip(_ width: CGFloat) -> some View {
@@ -448,6 +596,58 @@ private struct AlbumPostRow: View {
                     .allowsHitTesting(false)
             }
         }
+    }
+}
+
+/// 写评论：底部一小块，打开就弹键盘
+private struct CommentComposer: View {
+    @Environment(\.dismiss) private var dismiss
+    /// 回复谁（名字）；为空是直接评论
+    let replyTo: String?
+    let onSend: (String) async -> Bool
+    @State private var text = ""
+    @State private var sending = false
+    @FocusState private var focused: Bool
+
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(replyTo.map { "回复 \($0)" } ?? "写评论")
+                .font(Paper.title(.headline))
+                .foregroundStyle(Paper.ink)
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("说点什么…", text: $text, axis: .vertical)
+                    .lineLimit(1 ... 5)
+                    .focused($focused)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Paper.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Paper.line, lineWidth: 0.6))
+                Button {
+                    Task { await send() }
+                } label: {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 34))
+                        .foregroundStyle(trimmed.isEmpty ? Color.secondary : Theme.accentColor)
+                }
+                .buttonStyle(.plain)
+                .disabled(trimmed.isEmpty || sending)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .presentationDetents([.height(190)])
+        .presentationBackground(Paper.canvas)
+        .onAppear { focused = true }
+    }
+
+    private func send() async {
+        let value = String(trimmed.prefix(500))
+        guard !value.isEmpty else { return }
+        sending = true
+        defer { sending = false }
+        if await onSend(value) { dismiss() }
     }
 }
 

@@ -83,6 +83,8 @@ struct MessagePayload: Codable, Hashable {
     var requesterId: String?
     var handledBy: String?
     var plan: ConfirmPlan?
+    /// 确认卡片要做的事：plan 建计划（旧卡片没有这个字段）、plan-update 改计划、plan-delete 删计划、anniversary 记纪念日
+    var action: String?
     // 链接预览（服务端抓好后补上）
     var link: LinkPreview?
 
@@ -151,8 +153,23 @@ struct ConversationSummary: Codable, Identifiable, Hashable {
 struct Sticker: Codable, Identifiable, Hashable {
     let id: String
     let media: MessageMedia
+    /// 为空表示未分组
+    var groupId: String?
     let createdAt: Double
     var usedAt: Double?
+}
+
+/// 贴纸分组（每个人自己的）
+struct StickerGroup: Codable, Identifiable, Hashable {
+    let id: String
+    var title: String
+    var position: Int
+}
+
+/// 贴纸接口的返回：最新的贴纸和分组
+struct StickerState: Decodable {
+    let stickers: [Sticker]
+    let groups: [StickerGroup]?
 }
 
 struct Features: Codable, Hashable {
@@ -172,6 +189,7 @@ struct Bootstrap: Codable {
     let conversations: [ConversationSummary]
     let settings: SettingsBag
     let stickers: [Sticker]
+    let stickerGroups: [StickerGroup]?
     let latestSeq: Int
     let serverTime: Double
     let features: Features
@@ -265,8 +283,15 @@ struct Anniversary: Codable, Identifiable, Hashable {
     let id: String
     var title: String
     var date: String
+    /// yearly 每年重复；once 一个日子（过去的正数）；countdown 倒数日
     var kind: String
     var emoji: String
+    /// 用照片做图标
+    var iconMediaId: String?
+    /// 圆环颜色 RRGGBB，空的用主题色
+    var color: String?
+    /// 倒数日从哪天开始数，空的按创建那天
+    var startDate: String?
     var pinned: Bool
     let createdBy: String
     let createdAt: Double
@@ -310,9 +335,14 @@ struct Album: Codable, Identifiable, Hashable {
     var postCount: Int?
     var lastPostAt: Double?
     var previewMediaIds: [String]
+    /// 上次打开以后对方新发的动态、新写的评论
+    var newPosts: Int?
+    var newComments: Int?
     let createdBy: String
     let createdAt: Double
     var updatedAt: Double
+
+    var unread: Int { (newPosts ?? 0) + (newComments ?? 0) }
 }
 
 /// 相册里的一条动态：同一次发表的几张照片视频和一段文案
@@ -322,6 +352,20 @@ struct AlbumPost: Codable, Identifiable, Hashable {
     let addedBy: String
     let addedAt: Double
     let media: [MessageMedia]
+    var comments: [AlbumComment]?
+    /// 上次打开这个相册以后对方新发的
+    var isNew: Bool?
+}
+
+/// 动态下面的评论；replyToUserId 是被回复的人
+struct AlbumComment: Codable, Identifiable, Hashable {
+    let id: String
+    let userId: String
+    let text: String
+    let replyToId: String?
+    let replyToUserId: String?
+    let createdAt: Double
+    var isNew: Bool?
 }
 
 struct AlbumItem: Codable, Identifiable, Hashable {
@@ -544,6 +588,8 @@ struct CardDrawResult: Codable {
 }
 
 struct CardOverview: Codable {
+    /// 服务端的“今天”：缓存的翻牌结果只在同一天有效
+    var day: String?
     let cards: [Card]
     let partnerCards: [Card]
     var flipsPerDay: Int?

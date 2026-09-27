@@ -4,14 +4,26 @@ import UIKit
 /// 情侣特权卡：每日翻牌、卡包、进行中、图鉴
 struct CardsView: View {
     @Environment(AppModel.self) private var app
-    @State private var overview: CardOverview?
+    /// 先用上次存下的；翻牌结果只有是今天存的才算数
+    @State private var overview: CardOverview? = ResponseCache.shared.value(CardOverview.self, for: "v1/cards")
     @State private var tab = 0
-    @State private var flips: [Int: FlipOutcome] = [:]
+    @State private var flips: [Int: FlipOutcome] = CardsView.cachedFlips()
+    /// 今天翻了哪几张已经确定（今天的缓存或者网络回来了）；确定之前牌不能点，也不会先显示成六张都没翻
+    @State private var boardReady = CardsView.cachedFlipsAreToday()
     @State private var drawing: DrawState?
     @State private var selected: Card?
     @State private var toast: Toast?
 
     private var total: Int { overview?.flipsPerDay ?? 6 }
+
+    static func cachedFlipsAreToday() -> Bool {
+        ResponseCache.shared.value(CardOverview.self, for: "v1/cards")?.day == Format.dayKey(Date())
+    }
+
+    static func cachedFlips() -> [Int: FlipOutcome] {
+        guard let cached = ResponseCache.shared.value(CardOverview.self, for: "v1/cards"), cached.day == Format.dayKey(Date()) else { return [:] }
+        return Dictionary((cached.todayFlips ?? []).map { ($0.slot, FlipOutcome(card: $0.card)) }, uniquingKeysWith: { first, _ in first })
+    }
 
     var body: some View {
         ZStack {
@@ -21,6 +33,18 @@ struct CardsView: View {
                     FlipBoard(flips: flips, total: total, drawingSlot: drawing?.slot) { slot in
                         Task { await flip(slot) }
                     }
+                    .disabled(!boardReady)
+                    .opacity(boardReady ? 1 : 0.55)
+                    .overlay {
+                        if !boardReady {
+                            ProgressView("看看今天翻了哪几张…")
+                                .font(.footnote)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .glassEffect()
+                        }
+                    }
+                    .animation(.easeOut(duration: 0.25), value: boardReady)
                     CardTabs(selection: $tab)
                     switch tab {
                     case 0: inventory
@@ -58,9 +82,10 @@ struct CardsView: View {
     }
 
     private func load() async {
-        guard let value: CardOverview = try? await app.api.get("v1/cards") else { return }
+        guard let value: CardOverview = try? await app.api.get("v1/cards", cache: true) else { return }
         overview = value
         flips = Dictionary((value.todayFlips ?? []).map { ($0.slot, FlipOutcome(card: $0.card)) }, uniquingKeysWith: { first, _ in first })
+        boardReady = true
     }
 
     /// 点牌后牌先飞到舞台上蓄力，请求回来再翻面，不用干等网络

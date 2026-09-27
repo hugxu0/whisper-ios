@@ -79,5 +79,10 @@ final class ChatLayout: UICollectionViewLayout {
         index < frames.count ? frames[index] : nil
     }
 
+    /// 行数和算好的位置对不上（数据刚换、还没排版）时，按现在的高度马上重算
+    func prepareIfStale() {
+        if frames.count != heights.count { prepare() }
+    }
+
     var totalHeight: CGFloat { contentHeight }
 }

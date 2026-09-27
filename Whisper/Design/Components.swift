@@ -227,7 +227,7 @@ struct PhotoPicker: UIViewControllerRepresentable {
     }
 }
 
-/// Markdown 渲染（标题、列表、引用、代码块、分隔线；行内的粗体、斜体、链接交给系统）
+/// Markdown 渲染（标题、列表、待办、引用、代码块、分隔线；行内的粗体、斜体、链接交给系统）
 struct MarkdownText: View {
     let text: String
     var bodyFont: Font = .body
@@ -236,6 +236,7 @@ struct MarkdownText: View {
     private enum Block {
         case heading(Int, String)
         case bullet(String)
+        case task(Bool, String)
         case ordered(String, String)
         case quote(String)
         case code(String)
@@ -263,6 +264,16 @@ struct MarkdownText: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text("•").foregroundStyle(Theme.accentColor)
                 Text(Self.inline(content)).font(bodyFont).lineSpacing(lineSpacing)
+            }
+        case .task(let done, let content):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: done ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(done ? Theme.accentColor : Color.secondary)
+                Text(Self.inline(content))
+                    .font(bodyFont)
+                    .lineSpacing(lineSpacing)
+                    .strikethrough(done, color: .secondary)
+                    .opacity(done ? 0.6 : 1)
             }
         case .ordered(let number, let content):
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -326,7 +337,14 @@ struct MarkdownText: View {
                 result.append(.heading(level, String(line[match.upperBound...])))
             } else if let match = line.range(of: #"^[-*+]\s+"#, options: .regularExpression) {
                 flush()
-                result.append(.bullet(String(line[match.upperBound...])))
+                let content = String(line[match.upperBound...])
+                // “- [ ] 事项”“- [x] 事项”是待办
+                if let box = content.range(of: #"^\[[ xX]\]\s+"#, options: .regularExpression) {
+                    let done = content[box].lowercased().contains("x")
+                    result.append(.task(done, String(content[box.upperBound...])))
+                } else {
+                    result.append(.bullet(content))
+                }
             } else if let match = line.range(of: #"^\d+[.)]\s+"#, options: .regularExpression) {
                 flush()
                 let number = line[match].filter(\.isNumber)

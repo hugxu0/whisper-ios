@@ -28,6 +28,7 @@ private struct CacheSnapshot: Codable {
     var conversations: [ConversationSummary]
     var settings: SettingsBag
     var stickers: [Sticker]
+    var stickerGroups: [StickerGroup]?
     var features: Features
     var lastSeq: Int
     var recent: [String: [Message]]
@@ -49,6 +50,7 @@ final class AppModel {
     var conversations: [String: ConversationSummary] = [:]
     var settings = SettingsBag(shared: [:], mine: [:])
     var stickers: [Sticker] = []
+    var stickerGroups: [StickerGroup] = []
     var features = Features(daju: false, transcribe: false)
     var typing: [String: Date] = [:]
     var dajuActivity: [String: DajuActivity] = [:]
@@ -60,6 +62,10 @@ final class AppModel {
     var tabRequest: String?
     /// 深链要求打开的子页面（whisper://page/<名字>），由它所在标签页的根视图取走
     var pageRequest: String?
+    /// 推送里点开的相册（whisper://album/<id>），“我们”页取走
+    var albumRequest: String?
+    /// 相册里对方的新动态和新评论（“我们”标签上的数字）
+    var albumUnread = 0
     @ObservationIgnored private var launchRouteOpened = false
     /// 每类事件的计数，功能页面观察它来刷新（计划、纪念日、宠物、卡牌……）
     var revision: [String: Int] = [:]
@@ -71,6 +77,10 @@ final class AppModel {
     @ObservationIgnored private(set) var lastSeq = 0
     @ObservationIgnored private var saveWork: DispatchWorkItem?
     @ObservationIgnored private var catchingUp = false
+    /// 补拉进行中又要求补拉（比如又收到了跳号的事件）：这一轮结束后再拉一遍，不丢事件
+    @ObservationIgnored private var catchUpAgain = false
+    @ObservationIgnored private var prefetched = false
+    @ObservationIgnored private var albumRefresh: Task<Void, Never>?
     @ObservationIgnored private var bannerWork: DispatchWorkItem?
     @ObservationIgnored private var appActive = true
 
@@ -121,6 +131,9 @@ final class AppModel {
     }
 
     var totalUnread: Int { conversations.values.reduce(0) { $0 + $1.unreadCount } }
+    /// 聊天标签上的数字只算情侣聊天；和大橘的私聊算在大橘那边
+    var coupleUnread: Int { conversations["couple"]?.unreadCount ?? 0 }
+    var dajuUnread: Int { conversations[myDajuConversationId]?.unreadCount ?? 0 }
 
     func isTyping(_ conversationId: String) -> Bool {
         guard let until = typing[conversationId] else { return false }
@@ -184,13 +197,16 @@ final class AppModel {
         realtime.disconnect()
         Keychain.set(nil, for: "token")
         LocalCache.clear()
+        ResponseCache.shared.clear()
         api.token = nil
         chats = [:]
         me = nil
         users = [:]
         conversations = [:]
         stickers = []
+        stickerGroups = []
         lastSeq = 0
+        prefetched = false
         phase = .loggedOut
     }
 
@@ -208,6 +224,7 @@ final class AppModel {
         conversations = Dictionary(uniqueKeysWithValues: data.conversations.map { ($0.id, $0) })
         settings = data.settings
         stickers = data.stickers
+        stickerGroups = data.stickerGroups ?? []
         features = data.features
         lastSeq = data.latestSeq
         for chat in chats.values { await chat.reloadIfLive() }
@@ -217,19 +234,69 @@ final class AppModel {
 
     /// 按序号补拉错过的事件；落后太多时直接重新 bootstrap
     func catchUp() async {
-        guard !catchingUp else { return }
+        guard !catchingUp else {
+            catchUpAgain = true
+            return
+        }
         catchingUp = true
         defer { catchingUp = false }
-        do {
-            var more = true
-            while more {
-                let page: EventPage = try await api.get("v1/events", query: ["after": String(lastSeq), "limit": "500"])
-                for event in page.events { apply(event) }
-                more = page.hasMore
-                if page.events.isEmpty { break }
+        repeat {
+            catchUpAgain = false
+            do {
+                var more = true
+                while more {
+                    let page: EventPage = try await api.get("v1/events", query: ["after": String(lastSeq), "limit": "500"])
+                    for event in page.events { apply(event) }
+                    more = page.hasMore
+                    if page.events.isEmpty { break }
+                }
+            } catch {
+                // 下次连接时再补
+                return
             }
-        } catch {
-            // 下次连接时再补
+        } while catchUpAgain
+    }
+
+    /// 连上以后：补发之前没发出去的消息，还在“发送中”的去服务端核对一下
+    private func resumeOutgoing() {
+        for chat in chats.values {
+            chat.retryFailed()
+            Task { await chat.confirmPending() }
+        }
+    }
+
+    /// 重新算相册的未读数；相册事件往往一连好几条，等一下再拉
+    func refreshAlbumUnread(after delay: Double = 0) {
+        albumRefresh?.cancel()
+        albumRefresh = Task {
+            if delay > 0 { try? await Task.sleep(for: .seconds(delay)) }
+            guard !Task.isCancelled else { return }
+            struct AlbumList: Decodable { let albums: [Album] }
+            if let list: AlbumList = try? await api.get("v1/albums", cache: true) { setAlbums(list.albums) }
+        }
+    }
+
+    func setAlbums(_ albums: [Album]) {
+        albumUnread = albums.reduce(0) { $0 + $1.unread }
+    }
+
+    /// 启动后在后台把各个页面的数据先拉一遍存进缓存，第一次点开时也不用等
+    private func prefetchPages() {
+        guard !prefetched else { return }
+        prefetched = true
+        let api = self.api
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            refreshAlbumUnread()
+            let paths = ["v1/together", "v1/anniversaries", "v1/plans", "v1/wishes", "v1/capsules", "v1/pet", "v1/cards"]
+            for path in paths where (ResponseCache.shared.age(for: path) ?? .infinity) > 120 {
+                if let data = try? await api.send("GET", path) { ResponseCache.shared.store(data, for: path) }
+            }
+            let diary = ResponseCache.key("v1/daju/diaries", query: ["limit": "1"])
+            if (ResponseCache.shared.age(for: diary) ?? .infinity) > 600,
+               let data = try? await api.send("GET", "v1/daju/diaries", query: ["limit": "1"]) {
+                ResponseCache.shared.store(data, for: diary)
+            }
         }
     }
 
@@ -243,6 +310,8 @@ final class AppModel {
                 } else {
                     try? await bootstrap()
                 }
+                resumeOutgoing()
+                prefetchPages()
             }
         case .event(let event):
             if lastSeq > 0 && event.seq > lastSeq + 1 {
@@ -285,6 +354,7 @@ final class AppModel {
             Task { await reloadStickers() }
         default:
             revision[event.kind, default: 0] += 1
+            if event.kind == "album" { refreshAlbumUnread(after: 1) }
         }
         scheduleSave()
     }
@@ -343,8 +413,14 @@ final class AppModel {
     }
 
     func reloadStickers() async {
-        struct Response: Decodable { let stickers: [Sticker] }
-        if let response: Response = try? await api.get("v1/stickers") { stickers = response.stickers }
+        if let response: StickerState = try? await api.get("v1/stickers") { applyStickers(response) }
+    }
+
+    /// 贴纸接口都返回最新的贴纸和分组
+    func applyStickers(_ state: StickerState) {
+        stickers = state.stickers
+        stickerGroups = state.groups ?? stickerGroups
+        scheduleSave()
     }
 
     // MARK: - 横幅
@@ -396,6 +472,9 @@ final class AppModel {
         } else if url.host == "page", let page = url.pathComponents.dropFirst().first, let tab = Self.pageTabs[page] {
             tabRequest = tab
             pageRequest = page
+        } else if url.host == "album", let id = url.pathComponents.dropFirst().first {
+            tabRequest = "us"
+            albumRequest = id
         } else if url.host == "home" {
             // 回到聊天首页（会话列表）
             openConversationRequest = ""
@@ -439,6 +518,7 @@ final class AppModel {
         conversations = Dictionary(uniqueKeysWithValues: cache.conversations.map { ($0.id, $0) })
         settings = cache.settings
         stickers = cache.stickers
+        stickerGroups = cache.stickerGroups ?? []
         features = cache.features
         lastSeq = cache.lastSeq
         for (conversationId, messages) in cache.recent where !messages.isEmpty {
@@ -463,6 +543,7 @@ final class AppModel {
             conversations: Array(conversations.values),
             settings: settings,
             stickers: stickers,
+            stickerGroups: stickerGroups,
             features: features,
             lastSeq: lastSeq,
             recent: recent

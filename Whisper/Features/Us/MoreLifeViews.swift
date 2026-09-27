@@ -38,13 +38,14 @@ struct StatsView: View {
         return Array((current - 2) ... current)
     }
 
+    /// 统计要扫一遍全部消息，比较慢：先显示上次存下的，再在后台更新
     private func load() async {
-        loading = true
-        stats = nil
-        defer { loading = false }
         var query: [String: String?] = [:]
         if let year { query["year"] = String(year) }
-        stats = try? await app.api.get("v1/stats", query: query)
+        stats = app.api.cached("v1/stats", query: query)
+        loading = stats == nil
+        defer { loading = false }
+        if let fresh: Stats = try? await app.api.get("v1/stats", query: query, cache: true) { stats = fresh }
     }
 
     @ViewBuilder

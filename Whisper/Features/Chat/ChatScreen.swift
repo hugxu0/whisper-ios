@@ -15,11 +15,14 @@ struct ChatScreen: View {
             // 时间线延伸到导航栏下面、背景铺到屏幕最底下，上下留白由聊天页自己处理
             .ignoresSafeArea(.container, edges: [.top, .bottom])
             .toolbar(.hidden, for: .tabBar)
+            // 顶部完全透明，聊天内容一直延伸到状态栏下面
+            .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     ChatHeader(conversationId: conversationId)
                 }
+                .sharedBackgroundVisibility(.hidden)
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("搜索聊天记录", systemImage: "magnifyingglass") { showSearch = true }
@@ -67,7 +70,7 @@ struct ChatControllerView: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: ChatViewController, context: Context) {}
 }
 
-/// 标题：头像 + 名字 + 状态（正在输入 / 在线 / 最后在线 / 签名）
+/// 标题：头像 + 名字 + 状态（正在输入 / 在线 / 最后在线），装在和返回键一样的玻璃胶囊里
 struct ChatHeader: View {
     @Environment(AppModel.self) private var app
     let conversationId: String
@@ -76,24 +79,28 @@ struct ChatHeader: View {
         let isDaju = conversationId.hasPrefix("daju-")
         let userId = isDaju ? "daju" : app.partner?.id
         TimelineView(.periodic(from: .now, by: 5)) { _ in
-            HStack(spacing: 10) {
-                AvatarView(userId: userId, size: 34)
+            HStack(spacing: 8) {
+                AvatarView(userId: userId, size: 30)
                     .overlay(alignment: .bottomTrailing) {
                         if !isDaju, let id = userId, app.presence[id]?.online == true {
-                            Circle().fill(.green).frame(width: 10, height: 10).overlay(Circle().stroke(.background, lineWidth: 2))
+                            Circle().fill(.green).frame(width: 9, height: 9).overlay(Circle().stroke(.background, lineWidth: 1.5))
                         }
                     }
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 0) {
                     Text(isDaju ? (app.daju?.displayName ?? "大橘") : (userId.map { app.name($0) } ?? ""))
-                        .font(.headline)
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(subtitle(isDaju: isDaju, userId: userId))
-                        .font(.caption)
+                        .font(.caption2)
                         .foregroundStyle(isActive(isDaju: isDaju) ? Theme.accentColor : Color.secondary)
                         .lineLimit(1)
                         .contentTransition(.opacity)
                 }
             }
+            .padding(.leading, 4)
+            .padding(.trailing, 14)
+            .padding(.vertical, 4)
+            .glassEffect(.regular, in: Capsule())
         }
     }
 
