@@ -1,8 +1,8 @@
 import UIKit
 
-/// 贴纸面板，替换键盘显示。底下一排是分组（全部、自己建的分组、未分组），右边是管理；
-/// 第一格是“添加”，加的贴纸放进正在看的分组。
-final class StickerPanelView: UIView, UICollectionViewDataSource, UICollectionViewDelegate {
+/// 贴纸面板，替换键盘显示，和系统键盘一样高、一样的底色（UIInputView 的键盘样式），切换时输入栏不跳。
+/// 顶上一排是分组（全部、自己建的分组、未分组），右边是添加和管理；下面整块都是贴纸，一直铺到屏幕底。
+final class StickerPanelView: UIInputView, UICollectionViewDataSource, UICollectionViewDelegate {
     private(set) var stickers: [Sticker] = []
     private(set) var groups: [StickerGroup] = []
     /// 正在看哪一组：nil 是全部，"" 是未分组，其余是分组 id
@@ -21,58 +21,78 @@ final class StickerPanelView: UIView, UICollectionViewDataSource, UICollectionVi
     var onManage: (() -> Void)?
 
     private let collectionView: UICollectionView
-    private let emptyLabel = UILabel()
+    private let emptyView = UIStackView()
     private let tabScroll = UIScrollView()
     private let tabStack = UIStackView()
+    private let addButton = UIButton(type: .system)
     private let manageButton = UIButton(type: .system)
+    private let actionDivider = UIView()
     private let divider = UIView()
     private static let selectionKey = "stickerPanel.selection"
-    private static let tabHeight: CGFloat = 44
+    private static let barHeight: CGFloat = 46
 
-    override init(frame: CGRect) {
+    init(width: CGFloat) {
         let layout = UICollectionViewFlowLayout()
-        layout.minimumInteritemSpacing = 8
-        layout.minimumLineSpacing = 8
-        layout.sectionInset = UIEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        layout.minimumInteritemSpacing = 6
+        layout.minimumLineSpacing = 6
+        layout.sectionInset = UIEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
-        super.init(frame: frame)
-        backgroundColor = .secondarySystemBackground
+        super.init(frame: CGRect(x: 0, y: 0, width: width, height: 336), inputViewStyle: .keyboard)
+        allowsSelfSizing = false
         selection = UserDefaults.standard.string(forKey: Self.selectionKey)
+
         collectionView.backgroundColor = .clear
+        collectionView.alwaysBounceVertical = true
+        collectionView.showsVerticalScrollIndicator = false
+        collectionView.contentInsetAdjustmentBehavior = .never
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.register(StickerCell.self, forCellWithReuseIdentifier: "sticker")
         addSubview(collectionView)
 
-        emptyLabel.text = "这一组还没有贴纸，点 + 从相册加，或者在聊天里长按图片“添加到贴纸”"
+        let emptyIcon = UIImageView(image: UIImage(systemName: "face.smiling", withConfiguration: UIImage.SymbolConfiguration(pointSize: 30, weight: .light)))
+        emptyIcon.tintColor = .tertiaryLabel
+        let emptyLabel = UILabel()
+        emptyLabel.text = "这一组还没有贴纸\n点右上角 + 从相册加，或者在聊天里长按图片“添加到贴纸”"
         emptyLabel.font = .systemFont(ofSize: 13)
         emptyLabel.textColor = .secondaryLabel
         emptyLabel.numberOfLines = 0
         emptyLabel.textAlignment = .center
-        emptyLabel.isHidden = true
-        addSubview(emptyLabel)
+        emptyView.axis = .vertical
+        emptyView.alignment = .center
+        emptyView.spacing = 10
+        emptyView.addArrangedSubview(emptyIcon)
+        emptyView.addArrangedSubview(emptyLabel)
+        emptyView.isHidden = true
+        addSubview(emptyView)
 
-        divider.backgroundColor = .separator
-        addSubview(divider)
         tabScroll.showsHorizontalScrollIndicator = false
+        tabScroll.alwaysBounceHorizontal = true
         tabStack.axis = .horizontal
-        tabStack.spacing = 6
+        tabStack.spacing = 4
         tabStack.alignment = .center
         tabScroll.addSubview(tabStack)
         addSubview(tabScroll)
-        manageButton.setImage(UIImage(systemName: "slider.horizontal.3", withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)), for: .normal)
-        manageButton.tintColor = .secondaryLabel
-        manageButton.accessibilityLabel = "管理贴纸"
-        manageButton.addAction(UIAction { [weak self] _ in
-            Haptics.tap()
-            self?.onManage?()
-        }, for: .touchUpInside)
-        addSubview(manageButton)
-        autoresizingMask = [.flexibleWidth]
+
+        configureBarButton(addButton, symbol: "plus", label: "从相册添加贴纸") { [weak self] in self?.onAdd?() }
+        configureBarButton(manageButton, symbol: "slider.horizontal.3", label: "管理贴纸") { [weak self] in self?.onManage?() }
+        actionDivider.backgroundColor = .separator
+        divider.backgroundColor = .separator
+        [addButton, manageButton, actionDivider, divider].forEach(addSubview)
         rebuildTabs()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private func configureBarButton(_ button: UIButton, symbol: String, label: String, action: @escaping () -> Void) {
+        button.setImage(UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)), for: .normal)
+        button.tintColor = .label
+        button.accessibilityLabel = label
+        button.addAction(UIAction { _ in
+            Haptics.tap()
+            action()
+        }, for: .touchUpInside)
+    }
 
     func update(stickers: [Sticker], groups: [StickerGroup]) {
         self.stickers = stickers
@@ -89,11 +109,11 @@ final class StickerPanelView: UIView, UICollectionViewDataSource, UICollectionVi
         case .some(""): visible = stickers.filter { $0.groupId == nil }
         case .some(let id): visible = stickers.filter { $0.groupId == id }
         }
-        emptyLabel.isHidden = !visible.isEmpty
+        emptyView.isHidden = !visible.isEmpty
         collectionView.reloadData()
     }
 
-    /// 底下的分组按钮：全部、各个分组，有没分组的贴纸时再加一个“未分组”
+    /// 顶上的分组：全部、各个分组，有没分组的贴纸时再加一个“未分组”
     private func rebuildTabs() {
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         var tabs: [(title: String, value: String?)] = [(title: "全部", value: nil)]
@@ -104,12 +124,12 @@ final class StickerPanelView: UIView, UICollectionViewDataSource, UICollectionVi
             var configuration = UIButton.Configuration.plain()
             configuration.title = tab.title
             configuration.cornerStyle = .capsule
-            configuration.contentInsets = NSDirectionalEdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12)
+            configuration.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 13, bottom: 6, trailing: 13)
             configuration.baseForegroundColor = selected ? Theme.accent : .secondaryLabel
-            configuration.background.backgroundColor = selected ? Theme.accent.withAlphaComponent(0.15) : .clear
+            configuration.background.backgroundColor = selected ? Theme.accent.withAlphaComponent(0.16) : .clear
             configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
                 var attributes = attributes
-                attributes.font = .systemFont(ofSize: 14, weight: selected ? .semibold : .regular)
+                attributes.font = .systemFont(ofSize: 15, weight: selected ? .semibold : .regular)
                 return attributes
             }
             let button = UIButton(configuration: configuration)
@@ -132,45 +152,53 @@ final class StickerPanelView: UIView, UICollectionViewDataSource, UICollectionVi
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        let bar = Self.barHeight
+        let hairline = 1 / max(1, traitCollection.displayScale)
+        // 顶栏：左边分组可以横着滑，右边添加、管理
+        manageButton.frame = CGRect(x: bounds.width - 48, y: 0, width: 44, height: bar)
+        addButton.frame = CGRect(x: bounds.width - 92, y: 0, width: 44, height: bar)
+        actionDivider.frame = CGRect(x: bounds.width - 96, y: 13, width: hairline, height: bar - 26)
+        tabScroll.frame = CGRect(x: 6, y: 0, width: max(0, bounds.width - 106), height: bar)
+        let size = tabStack.systemLayoutSizeFitting(CGSize(width: UIView.layoutFittingCompressedSize.width, height: bar))
+        tabStack.frame = CGRect(x: 0, y: 0, width: size.width, height: bar)
+        tabScroll.contentSize = CGSize(width: size.width, height: bar)
+        divider.frame = CGRect(x: 0, y: bar, width: bounds.width, height: hairline)
+
+        // 贴纸铺满下面整块，最后一行能滑到底部安全区上面
+        collectionView.frame = CGRect(x: 0, y: bar, width: bounds.width, height: max(0, bounds.height - bar))
         let bottom = safeAreaInsets.bottom
-        let tabY = bounds.height - bottom - Self.tabHeight
-        collectionView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: max(0, tabY))
-        emptyLabel.frame = CGRect(x: 40, y: 0, width: bounds.width - 80, height: max(0, tabY)).insetBy(dx: 0, dy: 40)
-        divider.frame = CGRect(x: 0, y: tabY, width: bounds.width, height: 1 / max(1, traitCollection.displayScale))
-        manageButton.frame = CGRect(x: bounds.width - 50, y: tabY, width: 44, height: Self.tabHeight)
-        tabScroll.frame = CGRect(x: 8, y: tabY, width: max(0, bounds.width - 62), height: Self.tabHeight)
-        let size = tabStack.systemLayoutSizeFitting(CGSize(width: UIView.layoutFittingCompressedSize.width, height: Self.tabHeight))
-        tabStack.frame = CGRect(x: 0, y: 0, width: size.width, height: Self.tabHeight)
-        tabScroll.contentSize = CGSize(width: size.width, height: Self.tabHeight)
+        if collectionView.contentInset.bottom != bottom {
+            collectionView.contentInset.bottom = bottom
+            collectionView.verticalScrollIndicatorInsets.bottom = bottom
+        }
+        let emptyWidth = min(bounds.width - 64, 300)
+        let emptySize = emptyView.systemLayoutSizeFitting(CGSize(width: emptyWidth, height: UIView.layoutFittingCompressedSize.height), withHorizontalFittingPriority: .required, verticalFittingPriority: .fittingSizeLevel)
+        emptyView.frame = CGRect(x: (bounds.width - emptyWidth) / 2, y: bar + max(12, (bounds.height - bar - bottom - emptySize.height) / 2), width: emptyWidth, height: emptySize.height)
         if let layout = collectionView.collectionViewLayout as? UICollectionViewFlowLayout {
             let columns: CGFloat = bounds.width > 600 ? 8 : 5
-            let side = floor((bounds.width - 24 - (columns - 1) * 8) / columns)
+            let side = floor((bounds.width - 20 - (columns - 1) * 6) / columns)
             if layout.itemSize.width != side { layout.itemSize = CGSize(width: side, height: side) }
         }
     }
 
     func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
-        visible.count + 1
+        visible.count
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "sticker", for: indexPath) as! StickerCell
-        if indexPath.item == 0 {
-            cell.showAdd()
-        } else {
-            cell.show(visible[indexPath.item - 1])
-        }
+        cell.show(visible[indexPath.item])
         return cell
     }
 
     func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         Haptics.tap()
-        if indexPath.item == 0 { onAdd?() } else { onSelect?(visible[indexPath.item - 1]) }
+        onSelect?(visible[indexPath.item])
     }
 
     func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath], point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let indexPath = indexPaths.first, indexPath.item > 0 else { return nil }
-        let sticker = visible[indexPath.item - 1]
+        guard let indexPath = indexPaths.first, indexPath.item < visible.count else { return nil }
+        let sticker = visible[indexPath.item]
         return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
             UIMenu(children: [
                 UIAction(title: "管理贴纸", image: UIImage(systemName: "slider.horizontal.3")) { _ in self?.onManage?() },
@@ -196,7 +224,7 @@ final class StickerCell: UICollectionViewCell {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        imageView.frame = contentView.bounds.insetBy(dx: 4, dy: 4)
+        imageView.frame = contentView.bounds.insetBy(dx: 5, dy: 5)
     }
 
     override func prepareForReuse() {
@@ -205,16 +233,18 @@ final class StickerCell: UICollectionViewCell {
         imageView.image = nil
     }
 
-    func showAdd() {
-        contentView.backgroundColor = .tertiarySystemFill
-        imageView.image = UIImage(systemName: "plus")
-        imageView.tintColor = .secondaryLabel
-        imageView.contentMode = .center
+    /// 按下去时像表情键盘那样有个浅底、稍微缩一点
+    override var isHighlighted: Bool {
+        didSet {
+            UIView.animate(withDuration: isHighlighted ? 0.08 : 0.2) {
+                self.contentView.backgroundColor = self.isHighlighted ? UIColor.label.withAlphaComponent(0.08) : .clear
+                self.imageView.transform = self.isHighlighted ? CGAffineTransform(scaleX: 0.92, y: 0.92) : .identity
+            }
+        }
     }
 
     func show(_ sticker: Sticker) {
         contentView.backgroundColor = .clear
-        imageView.contentMode = .scaleAspectFit
         let pixel = bounds.width * UIScreen.main.scale
         task = Task { [weak self] in
             let image = await MediaCache.shared.animatedImage(sticker.media.id, maxPixel: max(160, pixel))

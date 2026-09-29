@@ -183,6 +183,11 @@ enum CardPalette {
     static let terracotta = Color(hex: 0xB9614A)
     static let back = [Color(hex: 0xD98A6A), Color(hex: 0xB0553F)]
     static let cream = Color(hex: 0xFFF1DE)
+    /// 大橘页入口上还没翻的小牌：蜂蜜黄，深色模式下暗一些
+    static let honey = [
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0xC9974A) : UIColor(hex: 0xF6D58C) }),
+        Color(uiColor: UIColor { $0.userInterfaceStyle == .dark ? UIColor(hex: 0x9A6A2C) : UIColor(hex: 0xE4A94C) }),
+    ]
 
     static func rarity(_ rarity: String) -> [Color] {
         (Theme.rarityColors[rarity] ?? Theme.rarityColors["common"]!).map { Color(hex: $0) }

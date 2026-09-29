@@ -22,6 +22,13 @@ enum VideoPoster {
     }
 }
 
+/// 从剪贴板粘贴来的一张图：原始字节先留着，等选了“发送”还是“当表情发”再压
+struct PastedImage {
+    let data: Data
+    let isGIF: Bool
+    let preview: UIImage
+}
+
 /// 上传前在手机上处理媒体：压缩、算尺寸、做缩略图
 enum MediaPrep {
     static func tempURL(_ ext: String) -> URL {
@@ -197,6 +204,44 @@ enum MediaPrep {
             return photo(data: data, maxSide: photoMaxSide)
         }
         return nil
+    }
+
+    /// 剪贴板里的图片（最多 9 张）：GIF 保持原样，其余先读出原始字节
+    static func pastedImages(_ providers: [NSItemProvider]) async -> [PastedImage] {
+        var images: [PastedImage] = []
+        for provider in providers.prefix(9) {
+            if provider.hasItemConformingToTypeIdentifier(UTType.gif.identifier), let data = await loadData(provider, type: .gif), let preview = UIImage(data: data) {
+                images.append(PastedImage(data: data, isGIF: true, preview: preview))
+            } else if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier), let data = await loadData(provider, type: .image),
+                      let preview = MediaCache.downsample(data, maxPixel: 900) {
+                images.append(PastedImage(data: data, isGIF: false, preview: preview))
+            }
+        }
+        return images
+    }
+
+    /// 粘贴的图当普通图片发：GIF 原样，其余和相册里的照片一样压
+    static func pastedPhotos(_ images: [PastedImage]) async -> [PreparedMedia] {
+        images.compactMap { $0.isGIF ? animatedGIF($0.data) : photo(data: $0.data) }
+    }
+
+    /// 当表情发：GIF 原样；其余缩到长边 512，有透明的存 PNG（存成 JPEG 透明的地方会变黑），没有的存 JPEG
+    static func sticker(_ image: PastedImage) async -> PreparedMedia? {
+        if image.isGIF { return animatedGIF(image.data) }
+        guard let small = MediaCache.downsample(image.data, maxPixel: 512), let cgImage = small.cgImage else { return nil }
+        let alphaKinds: [CGImageAlphaInfo] = [.first, .last, .premultipliedFirst, .premultipliedLast]
+        let png = alphaKinds.contains(cgImage.alphaInfo)
+        guard let data = png ? small.pngData() : small.jpegData(compressionQuality: 0.85) else { return nil }
+        let url = tempURL(png ? "png" : "jpg")
+        do { try data.write(to: url) } catch { return nil }
+        return PreparedMedia(
+            localId: "local-\(UUID().uuidString)",
+            fileURL: url,
+            filename: png ? "sticker.png" : "sticker.jpg",
+            meta: UploadMeta(kind: "image", mime: png ? "image/png" : "image/jpeg", width: cgImage.width, height: cgImage.height),
+            thumbnail: nil,
+            preview: small
+        )
     }
 
     private static func loadData(_ provider: NSItemProvider, type: UTType) async -> Data? {

@@ -335,10 +335,11 @@ struct HomeView: View {
         upcoming = Self.nearest(list.anniversaries)
     }
 
+    /// 只放每年的日子（生日、周年）；倒数日和正数日在“我们”页看，不放到这里
     private static func nearest(_ anniversaries: [Anniversary]) -> AnniversaryInfo? {
         anniversaries
+            .filter { $0.kind == "yearly" }
             .map { AnniversaryInfo($0) }
-            .filter { $0.isFuture || $0.days == 0 }
             .min { $0.days < $1.days }
     }
 

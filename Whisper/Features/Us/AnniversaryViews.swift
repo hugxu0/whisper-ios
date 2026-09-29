@@ -5,8 +5,14 @@ import UIKit
 extension AnniversaryInfo {
     var isToday: Bool { days == 0 }
     var isCountdown: Bool { anniversary.kind == "countdown" }
-    /// 还没到（或者就是今天）的：画圆环倒数
-    var countsDown: Bool { isFuture || isToday }
+    /// 还没到的（每年的、倒数日当天也算）：画圆环倒数。正数日从那天往后数，当天也不算倒数
+    var countsDown: Bool {
+        switch anniversary.kind {
+        case "yearly": return true
+        case "countdown": return isFuture || isToday
+        default: return isFuture
+        }
+    }
 
     /// 圆环的进度：每年重复的按离上一次过了多少；倒数日和将来的日子按从开始数的那天（没设就是建它那天）到目标过了多少；过去的满格
     var progress: Double {
@@ -43,7 +49,7 @@ extension AnniversaryInfo {
             return next
         }
         if isCountdown { return countsDown ? "\(original) · 倒数日" : "\(original) · 倒数结束了" }
-        return countsDown ? original : "\(original) · 已经过去"
+        return isCountUp ? "\(original) · 正数日" : original
     }
 
     /// 先排还没到的（越近越前），再排已经过去的
@@ -250,7 +256,7 @@ struct AnniversariesView: View {
         }
         .task {
             if model.anniversaries.isEmpty { await model.reloadAnniversaries(app) }
-            if model.anniversaries.map({ AnniversaryInfo($0) }).contains(where: \.isToday) {
+            if model.anniversaries.map({ AnniversaryInfo($0) }).contains(where: \.showsToday) {
                 try? await Task.sleep(for: .milliseconds(400))
                 celebrate = true
                 Haptics.success()
@@ -328,7 +334,7 @@ struct AnniversaryLine: View {
                 Text(info.subtitle).font(.caption).foregroundStyle(Paper.inkSoft).lineLimit(1)
             }
             Spacer(minLength: 6)
-            if info.isToday {
+            if info.showsToday {
                 Text("就是今天").font(.system(.headline, design: .serif)).foregroundStyle(info.tint)
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
@@ -365,7 +371,7 @@ struct AnniversaryShareCard: View {
             Text(info.isCountdown ? "距离「\(info.anniversary.title)」" : info.anniversary.title)
                 .font(.title2.weight(.bold))
                 .multilineTextAlignment(.center)
-            if info.isToday {
+            if info.showsToday {
                 Text("就是今天").font(.system(size: 44, weight: .heavy, design: .rounded))
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -512,8 +518,8 @@ struct AnniversaryDetailSheet: View {
             rows.append(Fact(label: "最早那天", value: Format.fullDate.string(from: original)))
             if since > 0 { rows.append(Fact(label: "已经过了", value: "\(since) 天")) }
         } else {
-            rows.append(Fact(label: info.isCountdown ? "目标日" : "日期", value: "\(Format.fullDate.string(from: original)) \(Format.weekday.string(from: original))"))
-            rows.append(Fact(label: info.isFuture ? "还有" : "已经", value: info.isToday ? "就是今天" : "\(info.days) 天"))
+            rows.append(Fact(label: info.isCountdown ? "目标日" : (info.isCountUp ? "从这天算起" : "日期"), value: "\(Format.fullDate.string(from: original)) \(Format.weekday.string(from: original))"))
+            rows.append(Fact(label: info.isFuture ? "还有" : "已经", value: info.showsToday ? "就是今天" : "\(info.days) 天"))
             if info.isCountdown && info.isFuture {
                 rows.append(Fact(label: "从哪天开始数", value: Format.fullDate.string(from: info.startDate)))
                 rows.append(Fact(label: "已经等了", value: "\(info.waitedDays) 天（\(Int((info.progress * 100).rounded()))%）"))
@@ -531,7 +537,7 @@ struct AnniversaryDetailSheet: View {
     }
 }
 
-/// 新建、编辑纪念日：三种类型（每年、倒数日、记录过了多少天），图标可以是任意表情或一张照片，还能选颜色
+/// 新建、编辑纪念日：三种类型（每年、倒数日、正数日），图标可以是任意表情或一张照片，还能选颜色
 struct AnniversaryEditor: View {
     @Environment(AppModel.self) private var app
     @Environment(\.dismiss) private var dismiss
@@ -564,11 +570,16 @@ struct AnniversaryEditor: View {
                     Picker("类型", selection: $kind) {
                         Text("每年").tag("yearly")
                         Text("倒数日").tag("countdown")
-                        Text("记录").tag("once")
+                        Text("正数日").tag("once")
                     }
                     .pickerStyle(.segmented)
-                    TextField(kind == "countdown" ? "倒数什么，比如：下次见面" : "名称，比如：她的生日", text: $title)
-                    DatePicker(kind == "countdown" ? "目标日" : "日期", selection: $date, displayedComponents: .date)
+                    TextField(titlePlaceholder, text: $title)
+                    if kind == "once" {
+                        // 正数日从今天或以前开始数；以前记的将来的日子也照样能改
+                        DatePicker("从哪天开始数", selection: $date, in: ...max(Date(), originalDate), displayedComponents: .date)
+                    } else {
+                        DatePicker(kind == "countdown" ? "目标日" : "日期", selection: $date, displayedComponents: .date)
+                    }
                     if kind == "countdown" {
                         DatePicker("从哪天开始数", selection: $startDate, in: ...max(date, startDate), displayedComponents: .date)
                     }
@@ -642,6 +653,10 @@ struct AnniversaryEditor: View {
                 }
             }
             .onAppear(perform: fill)
+            .onChange(of: kind) { _, value in
+                // 换成正数日时，以后的日子改回今天
+                if value == "once", date > max(Date(), originalDate) { date = Date() }
+            }
             .onChange(of: photoItem) { _, item in
                 guard let item else { return }
                 Task { await uploadPhoto(item) }
@@ -653,10 +668,23 @@ struct AnniversaryEditor: View {
 
     private var footer: String {
         switch kind {
-        case "countdown": return "倒数到那一天，圆环是已经等了多少；到了那天大橘会在聊天里说一声。"
-        case "once": return "记录一个日子：过去的显示已经多少天，将来的显示还有多少天。"
+        case "countdown": return "倒数到以后的那一天，圆环是已经等了多少；到了那天大橘会在聊天里说一声。"
+        case "once": return "从这一天往后数，显示已经多少天，比如在一起、上次见面。"
         default: return "每年这一天都会倒数，当天大橘会在聊天里送上祝福。"
         }
+    }
+
+    private var titlePlaceholder: String {
+        switch kind {
+        case "countdown": return "倒数什么，比如：下次见面"
+        case "once": return "正数什么，比如：在一起"
+        default: return "名称，比如：她的生日"
+        }
+    }
+
+    /// 编辑时原来的日期（以前记的正数日可能是将来的日子，日期选择不能把它排除在外）
+    private var originalDate: Date {
+        anniversary.flatMap { Format.parseDay($0.date) } ?? Date()
     }
 
     /// 顶上的小样：和列表里一样的圆环和图标
@@ -672,7 +700,7 @@ struct AnniversaryEditor: View {
                 AnniversaryIcon(info: info, size: 58)
             }
             .frame(width: 88, height: 88)
-            Text(info.isToday ? "就是今天" : (info.isFuture ? "还有 \(info.days) 天" : "已经 \(info.days) 天"))
+            Text(info.headline)
                 .font(.system(.headline, design: .serif))
                 .foregroundStyle(tint)
         }

@@ -23,6 +23,8 @@ final class ChatViewController: UIViewController {
     private var wallpaper: ChatWallpaper?
     private var rows: [Row] = []
     private var layoutCache: [String: (signature: String, width: CGFloat, layout: RowLayout)] = [:]
+    /// 每个 cell 最后一次是按什么内容配置的，定时和数据核对（见 healVisibleCells）
+    private var configured: [ObjectIdentifier: CellState] = [:]
     private var lastWidth: CGFloat = 0
     /// 跳转到的那条消息：从什么时候开始闪，cell 重建时接着闪完
     private var highlight: (id: String, start: CFTimeInterval)?
@@ -44,6 +46,12 @@ final class ChatViewController: UIViewController {
     private var previewURL: URL?
 
     private enum PickerPurpose { case send, sticker }
+
+    private struct CellState: Equatable {
+        let kind: String
+        let signature: String
+        let environment: String
+    }
 
     init(chat: ChatModel, app: AppModel) {
         self.chat = chat
@@ -108,6 +116,7 @@ final class ChatViewController: UIViewController {
         ])
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardWillChange(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
 
         jumpButton.configuration?.image = UIImage(systemName: "chevron.down", withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .bold))
         jumpButton.configuration?.cornerStyle = .capsule
@@ -174,11 +183,7 @@ final class ChatViewController: UIViewController {
             wallpaperImage.isHidden = false
             wallpaperDim.isHidden = false
             wallpaperDim.backgroundColor = UIColor.black.withAlphaComponent(next.dim)
-            let side = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height) * UIScreen.main.scale
-            Task { [weak self] in
-                let image = await MediaCache.shared.image(mediaId, thumb: false, maxPixel: side)
-                self?.wallpaperImage.image = image
-            }
+            showWallpaperPhoto(mediaId)
         } else if let next, let preset = WallpaperPresets.preset(next.key) {
             wallpaperGradient.isHidden = false
             wallpaperGradient.colors = preset.colors
@@ -187,7 +192,30 @@ final class ChatViewController: UIViewController {
                 wallpaperPattern.backgroundColor = WallpaperPresets.patternColor(symbol)
             }
         }
-        if changed, lastWidth > 0 { collectionView.reloadData() }
+        // 日期分隔在有背景时画成胶囊：原地刷新已经在的 cell
+        if changed, lastWidth > 0, collectionView.numberOfItems(inSection: 0) == rows.count {
+            collectionView.reconfigureItems(at: rows.indices.map { IndexPath(item: $0, section: 0) })
+        }
+    }
+
+    /// 退到后台时系统会用另一种深浅色把界面再画一遍（给多任务界面截图），白天、黑夜两张照片先后开始加载，
+    /// 以前是谁后加载完谁盖上去，回到前台时白天可能显示成黑夜那张。现在只认此刻该用的那张
+    private func showWallpaperPhoto(_ mediaId: String) {
+        let side = max(UIScreen.main.bounds.width, UIScreen.main.bounds.height) * UIScreen.main.scale
+        if let cached = MediaCache.shared.cachedImage(mediaId, thumb: false, maxPixel: side) {
+            wallpaperImage.image = cached
+            return
+        }
+        Task { [weak self] in
+            let image = await MediaCache.shared.image(mediaId, thumb: false, maxPixel: side)
+            guard let self, self.wallpaper?.kind == "photo", self.wallpaper?.mediaId == mediaId else { return }
+            self.wallpaperImage.image = image
+        }
+    }
+
+    /// 回到前台时按现在的深浅色再核对一遍背景
+    @objc private func appDidBecomeActive() {
+        applyWallpaper()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -273,7 +301,8 @@ final class ChatViewController: UIViewController {
             if firstLayout, let anchor = chat.pendingAnchor {
                 modelChanged(.reset(anchor: anchor))
             } else {
-                rebuild(anchor: stickToBottom ? .keepBottom : .keepAnchor)
+                // 宽度变了，每一行都要按新宽度重新排版
+                rebuild(anchor: stickToBottom ? .keepBottom : .keepAnchor, reload: true)
             }
             // 会话可能在首页就已经加载好了，不会再收到 reset；第一次排版后就允许翻页
             didInitialScroll = true
@@ -332,6 +361,7 @@ final class ChatViewController: UIViewController {
     }
 
     private func refreshStatusRows() {
+        healVisibleCells()
         let signature = "\(app.isTyping(chat.conversationId))|\(app.dajuActivity[chat.conversationId].map(TimelineBuilder.dajuText) ?? "")"
         guard signature != lastStatusSignature else { return }
         lastStatusSignature = signature
@@ -369,37 +399,23 @@ final class ChatViewController: UIViewController {
         collectionView.setContentOffset(CGPoint(x: 0, y: clampedOffset(frame.midY - inset.top - visible * 0.42)), animated: false)
     }
 
-    private func rebuild(anchor requested: ScrollIntent, animateInsert: Bool = false) {
+    private func rebuild(anchor requested: ScrollIntent, animateInsert: Bool = false, reload: Bool = false) {
         // 刚跳转过去的那条：这期间的翻页、刷新都以它为准，不按屏幕顶上那条保持
         var intent = requested
         if let target = pinnedTarget, case .keepAnchor = requested { intent = .scrollTo(target) }
-        let oldIds = rows.map(\.id)
-        let oldSignatures = rows.map(\.signature)
+        let oldRows = rows
         let savedAnchor = firstVisibleAnchor()
         let newRows = buildRows()
-        let newIds = newRows.map(\.id)
 
-        // 只在末尾追加时做插入动画。数据源和布局必须在同一批更新里一起换，
-        // 否则 UIKit 会发现条数对不上直接崩溃（发消息、收消息都走这里）。
-        let appendOnly = animateInsert && !oldIds.isEmpty && newIds.count > oldIds.count && Array(newIds.prefix(oldIds.count)) == oldIds
-        if appendOnly, collectionView.numberOfItems(inSection: 0) == oldIds.count {
-            let inserted = (oldIds.count ..< newIds.count).map { IndexPath(item: $0, section: 0) }
-            // 已有的行排版也可能变了（气泡分组、已读），一起刷新
-            let changed = (0 ..< oldIds.count).filter { oldSignatures[$0] != newRows[$0].signature }.map { IndexPath(item: $0, section: 0) }
-            chatLayout.appearingIndexes = Set(inserted.map(\.item))
-            collectionView.performBatchUpdates {
-                rows = newRows
-                chatLayout.heights = newRows.map(\.layout.height)
-                collectionView.insertItems(at: inserted)
-                if !changed.isEmpty { collectionView.reconfigureItems(at: changed) }
-            } completion: { [weak self] _ in
-                self?.chatLayout.appearingIndexes = []
-            }
-        } else {
+        if reload || oldRows.isEmpty || collectionView.numberOfItems(inSection: 0) != oldRows.count {
+            // 第一次有内容、宽度变了、或者列表和数据对不上：整表重新加载
             rows = newRows
             chatLayout.heights = newRows.map(\.layout.height)
+            chatLayout.appearingIndexes = []
             chatLayout.invalidateLayout()
             collectionView.reloadData()
+        } else {
+            applyChanges(from: oldRows, to: newRows, animateInsert: animateInsert)
         }
         collectionView.layoutIfNeeded()
 
@@ -416,6 +432,90 @@ final class ChatViewController: UIViewController {
             center(on: id)
         }
         updateJumpButton()
+    }
+
+    /// 按行 id 算出增删，数据源和布局在同一批更新里一起换；留下来的行内容变了就原地刷新（reconfigure）。
+    /// 不用 reloadData：刚发出的消息还在做插入动画时确认就到了，这时整表 reloadData 刷不到那一格，
+    /// 气泡会一直显示“发送中”，要等下一条消息把它顶上去（原地刷新）才变。
+    private func applyChanges(from oldRows: [Row], to newRows: [Row], animateInsert: Bool) {
+        var deleted = Set<Int>()
+        var inserted = Set<Int>()
+        for change in newRows.map(\.id).difference(from: oldRows.map(\.id)) {
+            switch change {
+            case .remove(let offset, _, _): deleted.insert(offset)
+            case .insert(let offset, _, _): inserted.insert(offset)
+            }
+        }
+        // 两边都在的行按顺序一一对应：换了种类（比如撤回后变成一行灰字）要换一个 cell，内容变了原地刷新
+        var reconfigured: [IndexPath] = []
+        var oldIndex = 0
+        for newIndex in newRows.indices where !inserted.contains(newIndex) {
+            while deleted.contains(oldIndex) { oldIndex += 1 }
+            guard oldIndex < oldRows.count else { break }
+            if Self.cellKind(oldRows[oldIndex]) != Self.cellKind(newRows[newIndex]) {
+                deleted.insert(oldIndex)
+                inserted.insert(newIndex)
+            } else if oldRows[oldIndex].signature != newRows[newIndex].signature {
+                reconfigured.append(IndexPath(item: newIndex, section: 0))
+            }
+            oldIndex += 1
+        }
+
+        // 只有新增、没有删除时（发消息、收消息）才做淡入动画
+        let animated = animateInsert && deleted.isEmpty && !inserted.isEmpty
+        chatLayout.appearingIndexes = animated ? inserted : []
+        let update = {
+            self.collectionView.performBatchUpdates {
+                self.rows = newRows
+                self.chatLayout.heights = newRows.map(\.layout.height)
+                if !deleted.isEmpty { self.collectionView.deleteItems(at: deleted.map { IndexPath(item: $0, section: 0) }) }
+                if !inserted.isEmpty { self.collectionView.insertItems(at: inserted.map { IndexPath(item: $0, section: 0) }) }
+            } completion: { [weak self] _ in
+                if animated { self?.chatLayout.appearingIndexes = [] }
+            }
+        }
+        if animated { update() } else { UIView.performWithoutAnimation(update) }
+        if !reconfigured.isEmpty { collectionView.reconfigureItems(at: reconfigured) }
+    }
+
+    /// 一行用哪种 cell；种类一样才能原地刷新
+    private static func cellKind(_ row: Row) -> String {
+        switch row.kind {
+        case .separator: return "separator"
+        case .system: return "system"
+        case .loadingOlder: return "loading"
+        case .typing: return "typing"
+        case .dajuStatus: return "daju"
+        case .message(let data):
+            if data.message.kind == "interaction" { return "interaction" }
+            if ["card", "reminder", "confirm"].contains(data.message.kind) { return "card" }
+            return "bubble"
+        }
+    }
+
+    /// 行内容以外也会影响 cell 样子的东西：宽度、有没有背景、主题色、头像、名字和备注
+    private var environmentKey: String {
+        let people = app.users.values.sorted { $0.id < $1.id }.map { "\($0.id):\($0.avatarMediaId ?? ""):\($0.displayName)" }.joined(separator: ",")
+        return "\(Int(lastWidth))|\(wallpaper != nil)|\(Theme.palette.key)|\(app.settings.mine["partnerAlias"]?.stringValue ?? "")|\(people)"
+    }
+
+    /// 兜底（每秒一次）：看得见的 cell 和数据对一遍，没刷上的原地刷新。不管哪里漏了一次刷新，一秒内也会改对
+    private func healVisibleCells() {
+        guard !rows.isEmpty, collectionView.numberOfItems(inSection: 0) == rows.count else { return }
+        let environment = environmentKey
+        var stale: [IndexPath] = []
+        var replaced: [IndexPath] = []
+        for indexPath in collectionView.indexPathsForVisibleItems where indexPath.item < rows.count {
+            guard let cell = collectionView.cellForItem(at: indexPath), let state = configured[ObjectIdentifier(cell)] else { continue }
+            let row = rows[indexPath.item]
+            if state.kind != Self.cellKind(row) {
+                replaced.append(indexPath)
+            } else if state.signature != row.signature || state.environment != environment {
+                stale.append(indexPath)
+            }
+        }
+        if !replaced.isEmpty { UIView.performWithoutAnimation { collectionView.reloadItems(at: replaced) } }
+        if !stale.isEmpty { collectionView.reconfigureItems(at: stale) }
     }
 
     private var minOffset: CGFloat { -collectionView.adjustedContentInset.top }
@@ -714,6 +814,12 @@ extension ChatViewController: UICollectionViewDataSource, UICollectionViewDelega
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
         let row = rows[indexPath.item]
+        let cell = dequeueCell(for: row, at: indexPath)
+        configured[ObjectIdentifier(cell)] = CellState(kind: Self.cellKind(row), signature: row.signature, environment: environmentKey)
+        return cell
+    }
+
+    private func dequeueCell(for row: Row, at indexPath: IndexPath) -> UICollectionViewCell {
         switch row.kind {
         case .separator(let text):
             let cell = collectionView.dequeueReusableCell(withReuseIdentifier: CenterCell.reuseId, for: indexPath) as! CenterCell
@@ -992,6 +1098,42 @@ extension ChatViewController: ComposerDelegate {
     }
 
     func composerContextCleared() {}
+
+    /// 粘贴了图片：先弹一个小页面看一眼，再发成图片或者当表情发
+    func composerPasteImages() {
+        // 在粘贴这一刻取走剪贴板的内容，后面慢慢读
+        let providers = UIPasteboard.general.itemProviders
+        Task {
+            let images = await MediaPrep.pastedImages(providers)
+            guard !images.isEmpty else {
+                showAlert("没有读到图片", "剪贴板里的内容发不了，换一张试试")
+                return
+            }
+            let sheet = PasteImagesSheet(images: images.map(\.preview)) { [weak self] asSticker in
+                self?.dismiss(animated: true)
+                self?.sendPasted(images, asSticker: asSticker)
+            } onCancel: { [weak self] in
+                self?.dismiss(animated: true)
+            }
+            let host = UIHostingController(rootView: sheet)
+            if let controller = host.sheetPresentationController {
+                controller.detents = [.medium()]
+                controller.prefersGrabberVisible = true
+            }
+            present(host, animated: true)
+        }
+    }
+
+    private func sendPasted(_ images: [PastedImage], asSticker: Bool) {
+        Haptics.tap()
+        Task {
+            if asSticker, let first = images.first {
+                if let prepared = await MediaPrep.sticker(first) { chat.sendMedia([prepared], kind: "sticker") }
+            } else {
+                sendPrepared(await MediaPrep.pastedPhotos(images))
+            }
+        }
+    }
 
     func composerLayoutChanged() {
         UIView.animate(withDuration: 0.2) {

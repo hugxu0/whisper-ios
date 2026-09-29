@@ -61,6 +61,8 @@ final class RealtimeClient {
     func disconnect() {
         wanted = false
         reconnectWork?.cancel()
+        // 先说一声不在 App 里了：万一断开没被服务端及时发现，推送也不会被挡住
+        send(["t": "focus", "conversationId": NSNull(), "inApp": false])
         teardown()
         setState(.disconnected)
     }
@@ -191,9 +193,10 @@ final class RealtimeClient {
         sendFocus()
     }
 
+    /// 连着就说明 App 在前台（退到后台会断开）：带上 inApp，服务端就不推 Bark，由应用内横幅提示
     private func sendFocus() {
         let value: Any = focus.map { $0 as Any } ?? NSNull()
-        send(["t": "focus", "conversationId": value])
+        send(["t": "focus", "conversationId": value, "inApp": true])
     }
 
     func sendTyping(_ conversationId: String) {

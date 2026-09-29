@@ -493,8 +493,11 @@ struct CardsPreviewCard: View {
                     shape.strokeBorder(Color.pink.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
                 }
             } else {
-                shape.fill(LinearGradient(colors: [Color(hex: 0x8B5CF6), Color(hex: 0x4D7CFF)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .overlay(Image(systemName: "suit.heart.fill").font(.system(size: 10)).foregroundStyle(.white.opacity(0.85)))
+                // 还没翻的牌背：蜂蜜黄，和纸张风格搭
+                shape.fill(LinearGradient(colors: CardPalette.honey, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay(shape.inset(by: 2.5).strokeBorder(CardPalette.cream.opacity(0.75), lineWidth: 0.8))
+                    .overlay(Image(systemName: "suit.heart.fill").font(.system(size: 10)).foregroundStyle(CardPalette.cream))
+                    .shadow(color: Color(hex: 0x7A5A2E).opacity(0.18), radius: 2, y: 1)
             }
         }
         .aspectRatio(0.7, contentMode: .fit)

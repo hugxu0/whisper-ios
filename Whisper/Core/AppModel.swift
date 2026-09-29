@@ -83,6 +83,9 @@ final class AppModel {
     @ObservationIgnored private var albumRefresh: Task<Void, Never>?
     @ObservationIgnored private var bannerWork: DispatchWorkItem?
     @ObservationIgnored private var appActive = true
+    @ObservationIgnored private var activeSince = Date()
+    /// 这一轮补拉到的新消息要不要弹横幅：App 一直开着、只是连接断了一会儿时要（服务端以为 App 开着，没推 Bark）
+    @ObservationIgnored private var announceCatchUp = false
 
     init() {
         api = APIClient(baseURL: APIClient.defaultBaseURL)
@@ -306,7 +309,10 @@ final class AppModel {
             for entry in entries { presence[entry.userId] = entry }
             Task {
                 if lastSeq > 0 && latest - lastSeq <= 3000 {
+                    // 刚回到前台时补拉到的不再提示（在后台时 Bark 已经推过了）
+                    announceCatchUp = appActive && Date().timeIntervalSince(activeSince) > 5
                     await catchUp()
+                    announceCatchUp = false
                 } else {
                     try? await bootstrap()
                 }
@@ -373,7 +379,7 @@ final class AppModel {
         guard isNew, fromOther else { return }
         typing[message.conversationId] = nil
         if message.senderId == "daju" { dajuActivity[message.conversationId] = nil }
-        guard live else { return }
+        guard live || (announceCatchUp && Date().timeIntervalSince(message.date) < 90) else { return }
         if focusedConversation == message.conversationId && appActive {
             if message.kind == "interaction", let interaction = message.payload.interaction {
                 interactionEffect = InteractionEffectRequest(interaction: interaction, fromMe: false)
@@ -438,6 +444,7 @@ final class AppModel {
     // MARK: - 前后台
 
     func sceneBecameActive() {
+        if !appActive { activeSince = Date() }
         appActive = true
         guard phase == .ready else { return }
         realtime.connect()

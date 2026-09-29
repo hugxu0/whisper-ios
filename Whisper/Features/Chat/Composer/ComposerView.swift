@@ -18,10 +18,32 @@ protocol ComposerDelegate: AnyObject {
     func composerVoiceRecorded(url: URL, durationMs: Int, waveform: [Double])
     func composerContextCleared()
     func composerLayoutChanged()
+    /// 输入框里粘贴了图片（剪贴板里只有图片时）
+    func composerPasteImages()
+}
+
+/// 输入框：剪贴板里是图片（相册、网页、别的聊天里复制的图或表情）时也能“粘贴”，交给聊天页去发；有文字就照常粘贴文字
+final class ComposerTextView: UITextView {
+    var onPasteImages: (() -> Void)?
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        // hasImages 只是看看有没有图片，不会触发系统的“允许粘贴”提示
+        if action == #selector(paste(_:)), UIPasteboard.general.hasImages { return true }
+        return super.canPerformAction(action, withSender: sender)
+    }
+
+    override func paste(_ sender: Any?) {
+        let board = UIPasteboard.general
+        if board.hasImages, !board.hasStrings, let onPasteImages {
+            onPasteImages()
+        } else {
+            super.paste(sender)
+        }
+    }
 }
 
 /// 底部输入栏
-final class ComposerView: UIView, UITextViewDelegate {
+final class ComposerView: UIView, UITextViewDelegate, UIGestureRecognizerDelegate {
     enum Context {
         case reply(Message, name: String)
         case edit(Message)
@@ -29,7 +51,7 @@ final class ComposerView: UIView, UITextViewDelegate {
 
     weak var delegate: ComposerDelegate?
     weak var hudHost: UIView?
-    let textView = UITextView()
+    let textView = ComposerTextView()
     private let placeholder = UILabel()
     private let inputBackground = UIVisualEffectView(effect: UIGlassEffect())
     private let plusButton = UIButton(configuration: .glass())
@@ -45,9 +67,15 @@ final class ComposerView: UIView, UITextViewDelegate {
     private let recorder = VoiceRecorder()
     private var recordingHUD: RecordingHUD?
     private var recordingCancelled = false
-    let stickerPanel = StickerPanelView()
+    let stickerPanel = StickerPanelView(width: UIScreen.main.bounds.width)
     private(set) var context: Context?
     var showsDajuShortcut = true
+
+    /// 系统键盘有多高（从屏幕底边算，含底部安全区）。贴纸面板做成一样高，键盘和贴纸来回切时输入栏不上下跳；记在本机，下次直接用
+    private static var keyboardHeight: CGFloat {
+        get { CGFloat(UserDefaults.standard.double(forKey: "composer.keyboardHeight")) }
+        set { UserDefaults.standard.set(Double(newValue), forKey: "composer.keyboardHeight") }
+    }
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -166,7 +194,42 @@ final class ComposerView: UIView, UITextViewDelegate {
         stickerPanel.onAdd = { [weak self] in self?.delegate?.composerAddSticker() }
         stickerPanel.onDelete = { [weak self] sticker in self?.delegate?.composerDeleteSticker(sticker) }
         stickerPanel.onManage = { [weak self] in self?.delegate?.composerManageStickers() }
+        textView.onPasteImages = { [weak self] in self?.delegate?.composerPasteImages() }
+        // 开着贴纸面板时点一下输入框，换回键盘
+        let tap = UITapGestureRecognizer(target: self, action: #selector(textViewTapped))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        textView.addGestureRecognizer(tap)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardFrameChanged(_:)), name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
         updateAction()
+    }
+
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        true
+    }
+
+    @objc private func textViewTapped() {
+        guard textView.inputView != nil else { return }
+        showKeyboard()
+    }
+
+    /// 记下系统键盘的高度（贴纸面板显示时报的是面板自己的高度，不算）
+    @objc private func keyboardFrameChanged(_ notification: Notification) {
+        guard textView.isFirstResponder, textView.inputView == nil,
+              let end = (notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue,
+              let screen = window?.windowScene?.screen else { return }
+        let height = screen.bounds.maxY - end.minY
+        // 外接键盘时只有一条很矮的工具栏，不算
+        guard height >= 200, height < screen.bounds.height * 0.7, abs(height - Self.keyboardHeight) > 0.5 else { return }
+        Self.keyboardHeight = height
+    }
+
+    /// 贴纸面板的高度：和上次看到的系统键盘一样；还没见过键盘时按屏幕估一个
+    private var stickerPanelHeight: CGFloat {
+        let saved = Self.keyboardHeight
+        if saved >= 200 { return saved }
+        let screenHeight = window?.windowScene?.screen.bounds.height ?? 852
+        return min(max(screenHeight * 0.4, 260), 380)
     }
 
     private func attachmentMenu() -> UIMenu {
@@ -313,13 +376,20 @@ final class ComposerView: UIView, UITextViewDelegate {
     private func toggleStickers() {
         Haptics.selection()
         if textView.inputView == nil {
-            stickerPanel.frame = CGRect(x: 0, y: 0, width: bounds.width, height: 300)
+            stickerPanel.frame = CGRect(x: 0, y: 0, width: window?.bounds.width ?? bounds.width, height: stickerPanelHeight)
             textView.inputView = stickerPanel
             stickerButton.setImage(UIImage(systemName: "keyboard", withConfiguration: UIImage.SymbolConfiguration(pointSize: 18)), for: .normal)
+            textView.reloadInputViews()
+            if !textView.isFirstResponder { textView.becomeFirstResponder() }
         } else {
-            textView.inputView = nil
-            stickerButton.setImage(UIImage(systemName: "face.smiling", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20)), for: .normal)
+            showKeyboard()
         }
+    }
+
+    /// 从贴纸面板换回系统键盘
+    private func showKeyboard() {
+        textView.inputView = nil
+        stickerButton.setImage(UIImage(systemName: "face.smiling", withConfiguration: UIImage.SymbolConfiguration(pointSize: 20)), for: .normal)
         textView.reloadInputViews()
         if !textView.isFirstResponder { textView.becomeFirstResponder() }
     }

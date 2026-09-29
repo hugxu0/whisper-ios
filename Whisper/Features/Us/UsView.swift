@@ -77,7 +77,7 @@ final class UsModel {
     }
 }
 
-/// 纪念日的计算：每年重复的算下一次还有几天；一次性的，过去的算已经几天，将来的算还有几天
+/// 纪念日的计算：每年重复的算下一次还有几天；倒数日算还有几天；正数日（kind 是 once）算从那天起已经几天
 struct AnniversaryInfo {
     let anniversary: Anniversary
     let days: Int
@@ -108,12 +108,15 @@ struct AnniversaryInfo {
         }
     }
 
+    /// 正数日：从那天往后数，当天就是“已经 0 天”，不当成倒数
+    var isCountUp: Bool { anniversary.kind == "once" && !isFuture }
+
+    /// 当天要显示“就是今天”的：每年的那天、倒数到了的那天；正数日不算
+    var showsToday: Bool { days == 0 && !isCountUp }
+
     var headline: String {
-        if anniversary.kind == "yearly" {
-            if days == 0 { return "就是今天" }
-            return "还有 \(days) 天"
-        }
-        if days == 0 { return "就是今天" }
+        if showsToday { return "就是今天" }
+        if isCountUp { return "已经 \(days) 天" }
         return isFuture ? "还有 \(days) 天" : "已经 \(days) 天"
     }
 }
