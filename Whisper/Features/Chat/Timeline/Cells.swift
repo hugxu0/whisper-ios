@@ -51,6 +51,8 @@ enum BubbleShape {
 final class BubbleView: UIView {
     let gradient = CAGradientLayer()
     let shape = CAShapeLayer()
+    private var style: BubbleStyle = .theirs
+    private var transparent = false
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -58,15 +60,28 @@ final class BubbleView: UIView {
         gradient.startPoint = CGPoint(x: 0, y: 0)
         gradient.endPoint = CGPoint(x: 1, y: 1)
         layer.mask = shape
+        // 图层上的颜色不会自己跟着深浅色变：深浅色一变（包括退到后台时系统换另一种颜色截图）就按自己现在的深浅色重新上色
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: BubbleView, _: UITraitCollection) in
+            view.applyColors()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     func configure(style: BubbleStyle, isMine: Bool, position: GroupPosition, transparent: Bool) {
+        self.style = style
+        self.transparent = transparent
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         gradient.frame = bounds
         shape.path = BubbleShape.path(bounds, isMine: isMine, position: position).cgPath
+        applyColors()
+        CATransaction.commit()
+    }
+
+    private func applyColors() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         if transparent {
             gradient.colors = [UIColor.clear.cgColor, UIColor.clear.cgColor]
         } else {

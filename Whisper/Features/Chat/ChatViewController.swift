@@ -192,10 +192,15 @@ final class ChatViewController: UIViewController {
                 wallpaperPattern.backgroundColor = WallpaperPresets.patternColor(symbol)
             }
         }
-        // 日期分隔在有背景时画成胶囊：原地刷新已经在的 cell
-        if changed, lastWidth > 0, collectionView.numberOfItems(inSection: 0) == rows.count {
-            collectionView.reconfigureItems(at: rows.indices.map { IndexPath(item: $0, section: 0) })
-        }
+        // 日期分隔在有背景时画成胶囊，要刷新已经在的 cell。不能在这里直接刷：这里常常是深浅色切换的回调，
+        // 这时 cell 还没拿到新的深浅色，按旧颜色上色（退到后台再回来，对方的气泡变成了黑色），
+        // 排版中途改列表还会留下错位的气泡。等这一轮做完再核对
+        if changed { scheduleHeal() }
+    }
+
+    /// 下一轮再和数据核对一遍看得见的 cell（见 healVisibleCells）
+    private func scheduleHeal() {
+        DispatchQueue.main.async { [weak self] in self?.healVisibleCells() }
     }
 
     /// 退到后台时系统会用另一种深浅色把界面再画一遍（给多任务界面截图），白天、黑夜两张照片先后开始加载，
@@ -213,9 +218,10 @@ final class ChatViewController: UIViewController {
         }
     }
 
-    /// 回到前台时按现在的深浅色再核对一遍背景
+    /// 回到前台时按现在的深浅色再核对一遍背景和气泡
     @objc private func appDidBecomeActive() {
         applyWallpaper()
+        scheduleHeal()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -493,15 +499,16 @@ final class ChatViewController: UIViewController {
         }
     }
 
-    /// 行内容以外也会影响 cell 样子的东西：宽度、有没有背景、主题色、头像、名字和备注
+    /// 行内容以外也会影响 cell 样子的东西：宽度、深浅色、有没有背景、主题色、头像、名字和备注
     private var environmentKey: String {
         let people = app.users.values.sorted { $0.id < $1.id }.map { "\($0.id):\($0.avatarMediaId ?? ""):\($0.displayName)" }.joined(separator: ",")
-        return "\(Int(lastWidth))|\(wallpaper != nil)|\(Theme.palette.key)|\(app.settings.mine["partnerAlias"]?.stringValue ?? "")|\(people)"
+        return "\(Int(lastWidth))|\(collectionView.traitCollection.userInterfaceStyle.rawValue)|\(wallpaper != nil)|\(Theme.palette.key)|\(app.settings.mine["partnerAlias"]?.stringValue ?? "")|\(people)"
     }
 
-    /// 兜底（每秒一次）：看得见的 cell 和数据对一遍，没刷上的原地刷新。不管哪里漏了一次刷新，一秒内也会改对
+    /// 兜底（每秒一次）：看得见的 cell 和数据对一遍，没刷上的原地刷新。不管哪里漏了一次刷新，一秒内也会改对。
+    /// 在后台时不动（系统换另一种深浅色截图那会儿），回到前台再核对
     private func healVisibleCells() {
-        guard !rows.isEmpty, collectionView.numberOfItems(inSection: 0) == rows.count else { return }
+        guard UIApplication.shared.applicationState != .background, !rows.isEmpty, collectionView.numberOfItems(inSection: 0) == rows.count else { return }
         let environment = environmentKey
         var stale: [IndexPath] = []
         var replaced: [IndexPath] = []
