@@ -44,6 +44,14 @@ struct MeView: View {
 
                     PaperGroup(title: "关于") {
                         PaperRow(icon: "info.circle.fill", tint: .teal, title: "版本", value: versionText, chevron: false)
+                        if let signingText {
+                            // 快到期时点一下打开 SideStore 续签
+                            Button {
+                                if !Signing.openSideStore() { toast = Toast(message: "没装 SideStore，到期前用电脑重新装一次", icon: "exclamationmark.circle") }
+                            } label: {
+                                PaperRow(icon: "signature", tint: Signing.expiringSoon() ? .orange : .green, title: "签名", subtitle: Signing.expiringSoon() ? "快到期了，点这里用 SideStore 续签" : nil, value: signingText, chevron: false)
+                            }
+                        }
                         PaperRow(icon: "dot.radiowaves.left.and.right", tint: app.connection == .connected ? .green : .gray, title: "实时连接", value: connectionText, chevron: false)
                     }
 
@@ -125,10 +133,13 @@ struct MeView: View {
         .paperCard(padding: 18, radius: 26)
     }
 
-    private var versionText: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
-        return "\(version) (\(build))"
+    private var versionText: String { APIClient.appVersion }
+
+    /// “还有 5 天（10月14日）”；不是侧载装的（没有描述文件）不显示
+    private var signingText: String? {
+        guard let expiresAt = Signing.expiresAt, let days = Signing.daysLeft() else { return nil }
+        let date = expiresAt.formatted(.dateTime.month().day())
+        return days == 0 ? "今天到期（\(date)）" : "还有 \(days) 天（\(date)）"
     }
 
     private var connectionText: String {

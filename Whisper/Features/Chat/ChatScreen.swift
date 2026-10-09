@@ -86,7 +86,8 @@ struct ChatHeader: View {
                             Circle().fill(.green).frame(width: 9, height: 9).overlay(Circle().stroke(.background, lineWidth: 1.5))
                         }
                     }
-                VStack(alignment: .leading, spacing: 0) {
+                // 名字（备注）和下面的状态一长一短，居中对齐才整齐
+                VStack(alignment: .center, spacing: 0) {
                     Text(isDaju ? (app.daju?.displayName ?? "大橘") : (userId.map { app.name($0) } ?? ""))
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
@@ -96,6 +97,7 @@ struct ChatHeader: View {
                         .lineLimit(1)
                         .contentTransition(.opacity)
                 }
+                .multilineTextAlignment(.center)
             }
             .padding(.leading, 4)
             .padding(.trailing, 14)

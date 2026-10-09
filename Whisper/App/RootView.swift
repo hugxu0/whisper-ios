@@ -60,9 +60,11 @@ struct MainTabView: View {
                 }
                 .badge(app.dajuUnread)
 
+                // 签名两天内到期：“我”上标个点，提醒去续签
                 Tab("我", systemImage: "person.crop.circle.fill", value: .me) {
                     MeView()
                 }
+                .badge(Signing.expiringSoon() ? Text("!") : nil)
             }
             .tabBarMinimizeBehavior(.onScrollDown)
 

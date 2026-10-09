@@ -1071,6 +1071,7 @@ extension ChatViewController: ComposerDelegate {
 
     func composerSendSticker(_ sticker: Sticker) {
         chat.sendSticker(sticker)
+        app.markStickerUsed(sticker.id)
     }
 
     func composerAddSticker() {
@@ -1155,22 +1156,31 @@ extension ChatViewController: ComposerDelegate {
         for video in videos { chat.sendMedia([video], kind: "video") }
     }
 
-    /// 从相册加的贴纸放进面板上正在看的那个分组
+    /// 从相册加的贴纸放进面板上正在看的那个分组；加好一张就显示一张（排在最前面），不用等全部传完
     private func uploadStickers(_ items: [PreparedMedia]) {
         let groupId = composer.stickerPanel.selectedGroupId
         Task {
+            var failed = 0
             for item in items {
+                var added = false
                 if let media = try? await app.api.upload(meta: item.meta, file: item.fileURL, filename: item.filename, thumb: item.thumbnail) {
                     if let data = try? Data(contentsOf: item.fileURL) { MediaCache.shared.store(data, id: media.id, thumb: false) }
                     var body: [String: Any] = ["mediaId": media.id]
                     if let groupId { body["groupId"] = groupId }
-                    _ = try? await app.api.send("POST", "v1/stickers", body: body)
+                    if let data = try? await app.api.send("POST", "v1/stickers", body: body), let state = try? JSONDecoder().decode(StickerState.self, from: data) {
+                        app.applyStickers(state)
+                        added = true
+                    }
                 }
+                if !added { failed += 1 }
                 try? FileManager.default.removeItem(at: item.fileURL)
             }
-            await app.reloadStickers()
-            composer.stickerPanel.update(stickers: app.stickers, groups: app.stickerGroups)
-            Haptics.success()
+            if failed > 0 {
+                await app.reloadStickers()
+                showAlert("有 \(failed) 张没加上", "网络不太好，等会儿再试试")
+            } else {
+                Haptics.success()
+            }
         }
     }
 }

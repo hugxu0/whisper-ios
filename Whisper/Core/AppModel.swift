@@ -158,7 +158,7 @@ final class AppModel {
             "password": password,
             "deviceName": UIDevice.current.name,
             "platform": "ios",
-            "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            "appVersion": APIClient.appVersion,
         ]
         let response: LoginResponse = try await api.post("v1/auth/login", body)
         Keychain.set(response.token, for: "token")
@@ -357,7 +357,12 @@ final class AppModel {
                 if scope == "shared" { settings.shared[key] = value } else { settings.mine[key] = value }
             }
         case "stickers":
-            Task { await reloadStickers() }
+            // 发了一张贴纸：原地挪到前面；别的改动（加、删、分组）重新拉整份
+            if let used = event.payload["used"], let id = used["id"]?.stringValue, let at = used["usedAt"]?.doubleValue {
+                markStickerUsed(id, at: at)
+            } else {
+                Task { await reloadStickers() }
+            }
         default:
             revision[event.kind, default: 0] += 1
             if event.kind == "album" { refreshAlbumUnread(after: 1) }
@@ -426,6 +431,17 @@ final class AppModel {
     func applyStickers(_ state: StickerState) {
         stickers = state.stickers
         stickerGroups = state.groups ?? stickerGroups
+        scheduleSave()
+    }
+
+    /// 刚发过的贴纸排到最前面（和服务端一样按“加的时间、最后发的时间”里晚的那个排）
+    func markStickerUsed(_ id: String, at: Double = Date().timeIntervalSince1970 * 1000) {
+        guard let index = stickers.firstIndex(where: { $0.id == id }) else { return }
+        var updated = stickers
+        updated[index].usedAt = max(updated[index].usedAt ?? 0, at)
+        updated.sort { max($0.usedAt ?? 0, $0.createdAt) > max($1.usedAt ?? 0, $1.createdAt) }
+        guard updated != stickers else { return }
+        stickers = updated
         scheduleSave()
     }
 

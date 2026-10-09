@@ -73,8 +73,17 @@ final class APIClient {
     func authorizedRequest(_ url: URL) -> URLRequest {
         var request = URLRequest(url: url)
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        // 服务端据此更新“登录设备”里这台设备的版本
+        request.setValue(Self.appVersion, forHTTPHeaderField: "X-Whisper-Version")
         return request
     }
+
+    /// “2.6.0 (16)”：版本号加构建号
+    static let appVersion: String = {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? ""
+        return build.isEmpty ? version : "\(version) (\(build))"
+    }()
 
     // MARK: - 媒体地址
 

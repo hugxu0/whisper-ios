@@ -94,13 +94,32 @@ final class StickerPanelView: UIInputView, UICollectionViewDataSource, UICollect
         }, for: .touchUpInside)
     }
 
+    /// 面板开着时只是顺序变了（刚发了一张）：先不动，免得贴纸在手指底下换位置，下次打开时再排
+    private var pendingOrder: [Sticker]?
+
     func update(stickers: [Sticker], groups: [StickerGroup]) {
+        let groups = groups.sorted { $0.position < $1.position }
+        let membership = { (list: [Sticker]) in Dictionary(list.map { ($0.id, $0.groupId ?? "") }, uniquingKeysWith: { first, _ in first }) }
+        if window != nil, groups == self.groups, membership(stickers) == membership(self.stickers) {
+            if stickers.map(\.id) != self.stickers.map(\.id) { pendingOrder = stickers }
+            return
+        }
+        pendingOrder = nil
         self.stickers = stickers
-        self.groups = groups.sorted { $0.position < $1.position }
+        self.groups = groups
         // 正在看的分组被删掉了：回到全部
         if let selection, !selection.isEmpty, !self.groups.contains(where: { $0.id == selection }) { self.selection = nil }
         rebuildTabs()
         reloadVisible()
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        guard window != nil, let pending = pendingOrder else { return }
+        pendingOrder = nil
+        stickers = pending
+        reloadVisible()
+        collectionView.setContentOffset(.zero, animated: false)
     }
 
     private func reloadVisible() {
