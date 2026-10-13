@@ -11,7 +11,7 @@ options:
 settings:
   base:
     # 版本号 2.第几版.修了几次：2 是悄悄话 v2，中间是按反馈改的第几版（PLAN.md 第 6 节），一版里再出修复包时末位加一
-    MARKETING_VERSION: "2.6.0"
+    MARKETING_VERSION: "2.6.1"
     # 构建号一直往上加：CI 打包时用 10 + run_number 覆盖
     CURRENT_PROJECT_VERSION: "1"
     # 用 Swift 5 语言模式：本机无法编译调试，避开 Swift 6 严格并发检查带来的大量编译错误
@@ -52,7 +52,7 @@ targets:
           - CFBundleURLName: com.hugxu0.whisper
             CFBundleURLSchemes:
               - whisper
-        # 签名快到期时打开 SideStore 续签，要先声明才能判断装没装
+        # “我 → 签名”打开 SideStore 续签，要先声明才能判断装没装
         LSApplicationQueriesSchemes:
           - sidestore
         # 只放开本机和局域网的明文连接（CI 截图时连本机的演示服务），线上仍然只走 HTTPS
